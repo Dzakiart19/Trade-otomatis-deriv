@@ -8,10 +8,17 @@ Menggunakan websocket-client native untuk kecepatan maksimal.
 Fitur:
 - Auto reconnect jika disconnect
 - Multi-account support (Demo/Real)
+- Multi-symbol tick subscriptions dengan per-symbol callbacks
 - Subscribe ke tick stream dan proposal_open_contract
 - Thread-safe untuk concurrent operations
 - Retry mechanism dengan exponential backoff
 - Health check ping/pong periodic
+
+Multi-Symbol Tick Subscriptions (v2.3):
+- subscribe_ticks(symbol, callback) - Subscribe dengan optional callback
+- unsubscribe_ticks(symbol) - Unsubscribe dari symbol tertentu
+- unsubscribe_all_ticks() - Unsubscribe semua subscriptions
+- get_subscribed_symbols() - List semua symbol yang di-subscribe
 =============================================================
 """
 
@@ -21,7 +28,7 @@ import threading
 import time
 import logging
 import re
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
 import websocket
@@ -119,9 +126,13 @@ class DerivWebSocket:
         self.pending_requests: Dict[int, Any] = {}
         self.request_id = 0
         
-        # Subscriptions
-        self.tick_subscription_id: Optional[str] = None
+        # Subscriptions - Multi-symbol support
+        self.tick_subscriptions: Dict[str, str] = {}  # symbol -> subscription_id
+        self.tick_callbacks: Dict[str, Callable] = {}  # symbol -> callback function
         self.contract_subscription_id: Optional[str] = None
+        
+        # Backward compatibility - keep legacy single subscription reference
+        self.tick_subscription_id: Optional[str] = None  # Deprecated: use tick_subscriptions
         
         # Authorization event for synchronization
         self._auth_event = threading.Event()
@@ -379,19 +390,48 @@ class DerivWebSocket:
                 logger.error(f"Error in balance callback: {e}")
             
     def _handle_tick(self, data: dict):
-        """Handle tick data stream"""
+        """
+        Handle tick data stream dengan multi-symbol support.
+        
+        Routes tick data ke callback yang tepat berdasarkan symbol:
+        1. Jika ada per-symbol callback di tick_callbacks, panggil itu
+        2. Jika ada global on_tick_callback, panggil juga untuk backward compatibility
+        
+        Args:
+            data: Tick data dari Deriv WebSocket
+        """
         if "error" in data:
             return
             
         tick_data = data.get("tick", {})
         price = tick_data.get("quote")
         symbol = tick_data.get("symbol")
+        subscription_id = data.get("subscription", {}).get("id")
         
-        if price and self.on_tick_callback:
+        if not price or not symbol:
+            return
+            
+        # Update subscription ID mapping jika belum ada
+        if subscription_id and symbol not in self.tick_subscriptions:
+            with self.lock:
+                self.tick_subscriptions[symbol] = subscription_id
+                logger.debug(f"📊 Registered tick subscription: {symbol} -> {subscription_id}")
+        
+        price_float = float(price)
+        
+        # 1. Call per-symbol callback jika ada
+        if symbol in self.tick_callbacks:
             try:
-                self.on_tick_callback(float(price), symbol)
+                self.tick_callbacks[symbol](price_float, symbol)
             except Exception as e:
-                logger.error(f"Error in tick callback: {e}")
+                logger.error(f"Error in tick callback for {symbol}: {e}")
+        
+        # 2. Call global callback untuk backward compatibility
+        if self.on_tick_callback:
+            try:
+                self.on_tick_callback(price_float, symbol)
+            except Exception as e:
+                logger.error(f"Error in global tick callback: {e}")
             
     def _handle_buy_response(self, data: dict):
         """Handle response dari buy contract"""
@@ -621,15 +661,31 @@ class DerivWebSocket:
             return False
     
     def _clear_pending_subscriptions(self):
-        """Clear semua pending subscriptions sebelum re-authorize"""
+        """
+        Clear semua pending subscriptions sebelum re-authorize.
+        
+        Enhancement v2.3 - Multi-symbol support:
+        - Clear all tick_subscriptions dictionary
+        - Clear all tick_callbacks dictionary
+        - Maintain backward compatibility dengan tick_subscription_id
+        """
         logger.info("🧹 Clearing pending subscriptions before reconnect...")
         
         with self.lock:
             self.pending_requests.clear()
+            
+            # Clear multi-symbol subscriptions
+            num_tick_subs = len(self.tick_subscriptions)
+            self.tick_subscriptions.clear()
+            self.tick_callbacks.clear()
+            
+            # Backward compatibility
             self.tick_subscription_id = None
             self.contract_subscription_id = None
             self.request_id = 0
             
+        if num_tick_subs > 0:
+            logger.debug(f"Cleared {num_tick_subs} tick subscription(s)")
         logger.debug("Pending subscriptions cleared")
     
     def _validate_connection_state(self) -> bool:
@@ -797,28 +853,134 @@ class DerivWebSocket:
         }
         return self._send(payload)
         
-    def subscribe_ticks(self, symbol: str = DEFAULT_SYMBOL) -> bool:
+    def subscribe_ticks(self, symbol: str = DEFAULT_SYMBOL, callback: Optional[Callable] = None) -> bool:
         """
-        Subscribe ke tick stream untuk symbol tertentu.
+        Subscribe ke tick stream untuk symbol tertentu dengan optional callback.
+        
+        Multi-symbol support: Bisa subscribe ke multiple symbols dengan callback berbeda.
+        Backward compatible: Jika tidak ada callback per-symbol, gunakan global on_tick_callback.
         
         Args:
             symbol: Symbol yang ingin di-subscribe (default: R_100)
+            callback: Optional callback function untuk symbol ini.
+                      Signature: callback(price: float, symbol: str)
             
         Returns:
             True jika request terkirim
+            
+        Example:
+            # Subscribe dengan global callback
+            ws.subscribe_ticks("R_100")
+            
+            # Subscribe dengan per-symbol callback
+            ws.subscribe_ticks("R_50", callback=lambda price, sym: print(f"{sym}: {price}"))
         """
+        # Check if already subscribed
+        if symbol in self.tick_subscriptions:
+            logger.info(f"📊 Already subscribed to {symbol}")
+            # Update callback jika diberikan
+            if callback:
+                with self.lock:
+                    self.tick_callbacks[symbol] = callback
+                logger.debug(f"Updated callback for {symbol}")
+            return True
+        
+        # Register callback jika diberikan
+        if callback:
+            with self.lock:
+                self.tick_callbacks[symbol] = callback
+            logger.debug(f"Registered callback for {symbol}")
+        
         payload = {
             "ticks": symbol,
             "subscribe": 1
         }
-        return self._send(payload)
         
-    def unsubscribe_ticks(self) -> bool:
-        """Unsubscribe dari tick stream"""
+        success = self._send(payload)
+        if success:
+            logger.info(f"📊 Subscribing to tick stream: {symbol}")
+        return success
+        
+    def unsubscribe_ticks(self, symbol: str) -> bool:
+        """
+        Unsubscribe dari tick stream untuk symbol tertentu.
+        
+        Args:
+            symbol: Symbol yang ingin di-unsubscribe
+            
+        Returns:
+            True jika request terkirim atau symbol tidak ada dalam subscriptions
+        """
+        # Check if subscribed
+        if symbol not in self.tick_subscriptions:
+            logger.debug(f"Not subscribed to {symbol}, nothing to unsubscribe")
+            # Cleanup callback jika ada
+            with self.lock:
+                self.tick_callbacks.pop(symbol, None)
+            return True
+            
+        subscription_id = self.tick_subscriptions.get(symbol)
+        
+        if subscription_id:
+            payload = {
+                "forget": subscription_id
+            }
+            success = self._send(payload)
+            
+            if success:
+                with self.lock:
+                    self.tick_subscriptions.pop(symbol, None)
+                    self.tick_callbacks.pop(symbol, None)
+                logger.info(f"📊 Unsubscribed from {symbol}")
+            return success
+        else:
+            # No subscription_id, just cleanup local state
+            with self.lock:
+                self.tick_subscriptions.pop(symbol, None)
+                self.tick_callbacks.pop(symbol, None)
+            return True
+    
+    def unsubscribe_all_ticks(self) -> None:
+        """
+        Unsubscribe dari semua tick subscriptions.
+        
+        Menggunakan forget_all untuk efficiency, lalu clear local state.
+        """
+        if not self.tick_subscriptions:
+            logger.debug("No tick subscriptions to clear")
+            return
+            
+        num_subs = len(self.tick_subscriptions)
+        
         payload = {
             "forget_all": "ticks"
         }
-        return self._send(payload)
+        success = self._send(payload)
+        
+        # Clear local state regardless of send result
+        with self.lock:
+            self.tick_subscriptions.clear()
+            self.tick_callbacks.clear()
+            self.tick_subscription_id = None  # Backward compatibility
+            
+        if success:
+            logger.info(f"📊 Unsubscribed from all {num_subs} tick stream(s)")
+        else:
+            logger.warning(f"⚠️ Failed to send unsubscribe_all, cleared {num_subs} local subscription(s)")
+    
+    def get_subscribed_symbols(self) -> List[str]:
+        """
+        Get list of currently subscribed symbols.
+        
+        Returns:
+            List of symbol strings that are currently subscribed
+            
+        Example:
+            symbols = ws.get_subscribed_symbols()
+            # Returns: ["R_100", "R_50", "R_75"]
+        """
+        with self.lock:
+            return list(self.tick_subscriptions.keys())
         
     def subscribe_contract(self, contract_id: str) -> bool:
         """
