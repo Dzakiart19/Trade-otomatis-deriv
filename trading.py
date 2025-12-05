@@ -1507,17 +1507,32 @@ class TradingManager:
         except Exception as e:
             logger.debug(f"Could not get volatility zone: {e}, using NORMAL")
         
-        # Tentukan lookahead berdasarkan martingale level
-        # Saat dalam sequence (level > 0), gunakan lookahead 3 level untuk balance fleksibilitas dan safety
-        if self.martingale_level > 0:
-            lookahead = 3  # Check 3 level ke depan saat dalam martingale sequence
-        else:
-            lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
+        # MARTINGALE RECOVERY PRIORITY: Jangan turunkan stake saat dalam martingale sequence
+        # Ini penting untuk recovery yang efektif setelah loss
+        if self.in_martingale_sequence and self.martingale_level > 0:
+            # Saat dalam martingale, hanya check apakah balance cukup
+            if self.current_stake > current_balance:
+                msg = f"Balance ${current_balance:.2f} tidak cukup untuk martingale stake ${self.current_stake:.2f}"
+                logger.error(f"🛑 {msg}")
+                return False, msg
+            
+            # Hard cap 50% balance untuk martingale (lebih toleran)
+            max_martingale_cap = current_balance * 0.50
+            if self.current_stake > max_martingale_cap:
+                old_stake = self.current_stake
+                self.current_stake = round(max_martingale_cap, 2)
+                logger.warning(f"⚠️ Martingale stake capped: ${old_stake:.2f} -> ${self.current_stake:.2f} (max 50% balance)")
+            
+            logger.info(f"📊 MARTINGALE MODE: stake=${self.current_stake:.2f}, level={self.martingale_level}, balance=${current_balance:.2f}")
+            return True, "Martingale recovery mode - stake preserved"
+        
+        # Normal mode (tidak dalam martingale) - gunakan risk check standar
+        lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
         
         # Hitung max safe stake dengan lookahead dan volatility zone
         safe_stake = self._calculate_max_safe_stake(current_balance, lookahead, volatility_zone)
         
-        # Hard cap: stake tidak boleh lebih dari 25% balance
+        # Hard cap: stake tidak boleh lebih dari 25% balance untuk trade awal
         max_stake_cap = current_balance * 0.25
         if self.current_stake > max_stake_cap:
             old_stake = self.current_stake
@@ -1531,7 +1546,7 @@ class TradingManager:
             # Pastikan safe stake tidak di bawah minimum
             if safe_stake >= min_stake:
                 self.current_stake = safe_stake
-                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (martingale level {self.martingale_level}, vol zone: {volatility_zone})")
+                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (vol zone: {volatility_zone})")
             else:
                 # Balance terlalu rendah, tapi tetap coba dengan min stake
                 if current_balance >= min_stake:
