@@ -45,6 +45,9 @@ logs/
 .env.local
 .env.*.local
 
+# Session secret (generated at runtime)
+.session_secret
+
 # OS
 .DS_Store
 Thumbs.db

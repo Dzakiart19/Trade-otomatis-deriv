@@ -828,10 +828,12 @@ class TradingManager:
                 self._complete_session()
                 return
             else:
+                # BALANCE GUARD: Get current balance BEFORE calculating next stake
+                current_balance = self.ws.get_balance()
                 multiplier = self._get_martingale_multiplier()
                 next_stake = round(self.current_stake * multiplier, 2)
                 
-                current_balance = self.ws.get_balance()
+                # Pre-check: Ensure next stake doesn't exceed balance
                 if next_stake > current_balance:
                     logger.warning(f"⚠️ Martingale stake ${next_stake:.2f} melebihi balance ${current_balance:.2f}")
                     if self.on_error:
@@ -1265,6 +1267,11 @@ class TradingManager:
                         stats.get("rsi", 0),
                         stats.get("trend", "N/A")
                     ])
+                    
+                    # Flush to OS buffer
+                    f.flush()
+                    # Ensure data hits disk before rename
+                    os.fsync(f.fileno())
                 
                 # Atomic rename
                 shutil.move(temp_file, journal_file)

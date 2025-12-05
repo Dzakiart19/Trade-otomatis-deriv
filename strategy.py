@@ -250,6 +250,14 @@ class TradingStrategy:
         self.last_sell_time: Optional[datetime] = None
         self.last_signal_time: Optional[datetime] = None
         
+        self._ema_fast_cache: Optional[float] = None
+        self._ema_slow_cache: Optional[float] = None
+        self._macd_ema_fast_cache: Optional[float] = None
+        self._macd_ema_slow_cache: Optional[float] = None
+        self._macd_signal_cache: Optional[float] = None
+        self._macd_values_cache: List[float] = []
+        self._last_tick_count_for_ema: int = 0
+        
     def add_tick(self, price: float) -> None:
         """
         Tambahkan tick baru ke history.
@@ -343,7 +351,7 @@ class TradingStrategy:
             logger.debug(f"Memory logging error (non-critical): {e}")
             
     def clear_history(self) -> None:
-        """Reset semua history"""
+        """Reset semua history dan EMA cache"""
         self.tick_history.clear()
         self.high_history.clear()
         self.low_history.clear()
@@ -355,6 +363,14 @@ class TradingStrategy:
         self.last_buy_time = None
         self.last_sell_time = None
         self.last_signal_time = None
+        
+        self._ema_fast_cache = None
+        self._ema_slow_cache = None
+        self._macd_ema_fast_cache = None
+        self._macd_ema_slow_cache = None
+        self._macd_signal_cache = None
+        self._macd_values_cache.clear()
+        self._last_tick_count_for_ema = 0
         
     def calculate_ema(self, prices: List[float], period: int) -> float:
         """
@@ -372,6 +388,123 @@ class TradingStrategy:
             ema = safe_float(price) * k + ema * (1 - k)
             
         return round(ema, 5)
+    
+    def calculate_ema_incremental(self, period: int, cache_type: str) -> float:
+        """
+        Calculate EMA incrementally using cached value - O(1) per tick.
+        
+        Instead of recalculating from scratch every tick (O(n) per call, O(n²) total),
+        this method updates the cached EMA with only the latest price.
+        
+        Formula: EMA_new = price * k + EMA_prev * (1 - k)
+        where k = 2 / (period + 1)
+        
+        Args:
+            period: EMA period (e.g., 9 for fast, 21 for slow)
+            cache_type: "fast" or "slow" to select which cache to use
+            
+        Returns:
+            Updated EMA value
+        """
+        if len(self.tick_history) < period:
+            return safe_divide(sum(self.tick_history), len(self.tick_history), 0.0) if self.tick_history else 0.0
+        
+        current_price = safe_float(self.tick_history[-1])
+        k = safe_divide(2, period + 1, 0.0)
+        
+        if cache_type == "fast":
+            cached_ema = self._ema_fast_cache
+        elif cache_type == "slow":
+            cached_ema = self._ema_slow_cache
+        else:
+            cached_ema = None
+        
+        need_full_calc = (
+            cached_ema is None or 
+            self._last_tick_count_for_ema == 0 or
+            len(self.tick_history) - self._last_tick_count_for_ema > 1
+        )
+        
+        if need_full_calc:
+            ema = self.calculate_ema(self.tick_history, period)
+        else:
+            # cached_ema is guaranteed not None here due to need_full_calc check
+            prev_ema = cached_ema if cached_ema is not None else 0.0
+            ema = current_price * k + prev_ema * (1 - k)
+            ema = round(ema, 5)
+        
+        if cache_type == "fast":
+            self._ema_fast_cache = ema
+        elif cache_type == "slow":
+            self._ema_slow_cache = ema
+        
+        return ema
+    
+    def calculate_macd_incremental(self) -> Tuple[float, float, float]:
+        """
+        Calculate MACD incrementally using cached EMA values - O(1) per tick.
+        
+        Instead of recalculating all EMA subsets for each tick (O(n²) complexity),
+        this method uses incremental EMA updates.
+        
+        Returns: (macd_line, signal_line, histogram)
+        """
+        if len(self.tick_history) < self.MACD_SLOW + self.MACD_SIGNAL:
+            return 0.0, 0.0, 0.0
+        
+        current_price = safe_float(self.tick_history[-1])
+        k_fast = safe_divide(2, self.MACD_FAST + 1, 0.0)
+        k_slow = safe_divide(2, self.MACD_SLOW + 1, 0.0)
+        k_signal = safe_divide(2, self.MACD_SIGNAL + 1, 0.0)
+        
+        need_full_calc = (
+            self._macd_ema_fast_cache is None or
+            self._macd_ema_slow_cache is None or
+            self._last_tick_count_for_ema == 0 or
+            len(self.tick_history) - self._last_tick_count_for_ema > 1
+        )
+        
+        if need_full_calc:
+            ema_fast = self.calculate_ema(self.tick_history, self.MACD_FAST)
+            ema_slow = self.calculate_ema(self.tick_history, self.MACD_SLOW)
+            
+            self._macd_values_cache.clear()
+            for i in range(self.MACD_SLOW, len(self.tick_history) + 1):
+                subset = self.tick_history[:i]
+                ema_f = self.calculate_ema(subset, self.MACD_FAST)
+                ema_s = self.calculate_ema(subset, self.MACD_SLOW)
+                self._macd_values_cache.append(ema_f - ema_s)
+        else:
+            # Cache values are guaranteed not None here due to need_full_calc check
+            prev_ema_fast = self._macd_ema_fast_cache if self._macd_ema_fast_cache is not None else 0.0
+            prev_ema_slow = self._macd_ema_slow_cache if self._macd_ema_slow_cache is not None else 0.0
+            ema_fast = current_price * k_fast + prev_ema_fast * (1 - k_fast)
+            ema_slow = current_price * k_slow + prev_ema_slow * (1 - k_slow)
+            
+            new_macd_value = ema_fast - ema_slow
+            self._macd_values_cache.append(new_macd_value)
+            
+            if len(self._macd_values_cache) > self.MAX_TICK_HISTORY:
+                self._macd_values_cache = self._macd_values_cache[-self.MAX_TICK_HISTORY:]
+        
+        self._macd_ema_fast_cache = ema_fast
+        self._macd_ema_slow_cache = ema_slow
+        
+        macd_line = ema_fast - ema_slow
+        
+        if len(self._macd_values_cache) >= self.MACD_SIGNAL:
+            if self._macd_signal_cache is not None and not need_full_calc:
+                signal_line = macd_line * k_signal + self._macd_signal_cache * (1 - k_signal)
+            else:
+                signal_line = self.calculate_ema(self._macd_values_cache, self.MACD_SIGNAL)
+            self._macd_signal_cache = signal_line
+        else:
+            signal_line = safe_divide(sum(self._macd_values_cache), len(self._macd_values_cache), 0.0) if self._macd_values_cache else 0
+            self._macd_signal_cache = signal_line
+        
+        histogram = macd_line - signal_line
+        
+        return round(macd_line, 6), round(signal_line, 6), round(histogram, 6)
         
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         """
@@ -1287,6 +1420,10 @@ class TradingStrategy:
     def calculate_all_indicators(self) -> IndicatorValues:
         """
         Calculate semua indikator sekaligus.
+        
+        Enhancement v2.4:
+        - Uses incremental EMA calculation for O(1) per tick complexity
+        - Caches EMA values to avoid O(n²) recalculation
         """
         indicators = IndicatorValues()
         
@@ -1296,11 +1433,11 @@ class TradingStrategy:
         indicators.rsi = self.calculate_rsi(self.tick_history, self.RSI_PERIOD)
         
         if len(self.tick_history) >= self.EMA_SLOW_PERIOD:
-            indicators.ema_fast = self.calculate_ema(self.tick_history, self.EMA_FAST_PERIOD)
-            indicators.ema_slow = self.calculate_ema(self.tick_history, self.EMA_SLOW_PERIOD)
+            indicators.ema_fast = self.calculate_ema_incremental(self.EMA_FAST_PERIOD, "fast")
+            indicators.ema_slow = self.calculate_ema_incremental(self.EMA_SLOW_PERIOD, "slow")
             
         if len(self.tick_history) >= self.MACD_SLOW + self.MACD_SIGNAL:
-            macd_line, macd_signal, macd_hist = self.calculate_macd(self.tick_history)
+            macd_line, macd_signal, macd_hist = self.calculate_macd_incremental()
             indicators.macd_line = macd_line
             indicators.macd_signal = macd_signal
             indicators.macd_histogram = macd_hist
@@ -1328,6 +1465,8 @@ class TradingStrategy:
         trend_dir, trend_strength = self.detect_trend(self.TREND_TICKS)
         indicators.trend_direction = trend_dir
         indicators.trend_strength = trend_strength
+        
+        self._last_tick_count_for_ema = len(self.tick_history)
         
         self.last_indicators = indicators
         return indicators

@@ -100,7 +100,8 @@ class DerivWebSocket:
         
         # Status koneksi
         self.ws: Optional[websocket.WebSocketApp] = None
-        self.is_connected = False
+        self._is_connected = False
+        self._is_connected_lock = threading.Lock()
         self.is_authorized = False
         self.current_account_type = AccountType.DEMO
         self._connection_state = "disconnected"  # disconnected, connecting, connected, authorizing, ready
@@ -168,6 +169,18 @@ class DerivWebSocket:
                 
         if not self.demo_token and not self.real_token:
             logger.error("❌ No valid tokens provided!")
+    
+    @property
+    def is_connected(self) -> bool:
+        """Thread-safe getter for connection status"""
+        with self._is_connected_lock:
+            return self._is_connected
+    
+    @is_connected.setter
+    def is_connected(self, value: bool):
+        """Thread-safe setter for connection status"""
+        with self._is_connected_lock:
+            self._is_connected = value
             
     def _update_connection_state(self, state: str):
         """Update connection state dan trigger callback jika ada"""
@@ -658,6 +671,9 @@ class DerivWebSocket:
                     if not self._send({"ping": 1}):
                         logger.warning("❌ Failed to send ping")
                     
+                    # Cleanup expired pending requests to prevent memory leak
+                    self._cleanup_pending_requests()
+                    
                 except Exception as e:
                     logger.error(f"Health check error: {type(e).__name__}: {e}")
                     break
@@ -732,6 +748,33 @@ class DerivWebSocket:
             logger.debug(f"Connection state validation: {self._connection_state} - not ready")
             return False
         return True
+    
+    def _cleanup_pending_requests(self):
+        """
+        Cleanup pending requests yang sudah melewati timeout.
+        
+        Mencegah memory leak dengan menghapus pending requests
+        yang sudah expired (lebih dari PENDING_REQUEST_TIMEOUT detik).
+        
+        Dipanggil secara periodic dari health check loop.
+        """
+        current_time = time.time()
+        expired_requests = []
+        
+        with self.lock:
+            for req_id, req_data in self.pending_requests.items():
+                if isinstance(req_data, dict) and "timestamp" in req_data:
+                    elapsed = current_time - req_data["timestamp"]
+                    if elapsed > self.PENDING_REQUEST_TIMEOUT:
+                        expired_requests.append(req_id)
+                elif isinstance(req_data, dict):
+                    expired_requests.append(req_id)
+            
+            for req_id in expired_requests:
+                self.pending_requests.pop(req_id, None)
+        
+        if expired_requests:
+            logger.debug(f"🧹 Cleaned up {len(expired_requests)} expired pending request(s)")
     
     def _attempt_reconnect(self):
         """

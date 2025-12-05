@@ -73,12 +73,30 @@ class UserAuthManager:
         logger.info("🔐 UserAuthManager initialized")
         
     def _init_encryption(self):
-        """Inisialisasi Fernet encryption dengan key dari environment"""
+        """Inisialisasi Fernet encryption dengan key dari environment atau persistent file"""
         secret = os.environ.get("SESSION_SECRET", "")
+        secret_file = ".session_secret"
         
         if not secret:
-            secret = os.urandom(32).hex()
-            logger.warning("⚠️ SESSION_SECRET not found, using random key (sessions won't persist across restarts)")
+            if os.path.exists(secret_file):
+                try:
+                    with open(secret_file, 'r') as f:
+                        secret = f.read().strip()
+                    if secret:
+                        logger.info("✅ Loaded SESSION_SECRET from persistent file")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to read {secret_file}: {e}")
+                    secret = ""
+            
+            if not secret:
+                secret = os.urandom(32).hex()
+                try:
+                    with open(secret_file, 'w') as f:
+                        f.write(secret)
+                    os.chmod(secret_file, 0o600)
+                    logger.info(f"✅ Generated new SESSION_SECRET (saved to {secret_file})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to save SESSION_SECRET to file: {e}, sessions won't persist across restarts")
         
         salt = b"deriv_trading_bot_v1"
         kdf = PBKDF2HMAC(

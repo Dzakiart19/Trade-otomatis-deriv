@@ -70,6 +70,9 @@ class PairScanner:
     DEFAULT_SCAN_INTERVAL = 15.0
     DEFAULT_MIN_TICKS = 30
     
+    TICK_PRUNE_THRESHOLD = 10000
+    PRUNE_INTERVAL = 1000
+    
     MAX_SCORE = 100.0
     BASE_SCORE_SIGNAL = 50.0
     MAX_CONFIDENCE_BONUS = 30.0
@@ -143,6 +146,7 @@ class PairScanner:
         
         Route tick ke strategy yang tepat dan update tick count.
         Thread-safe untuk concurrent tick updates.
+        Periodic cleanup setiap PRUNE_INTERVAL ticks per symbol.
         
         Args:
             price: Tick price dari Deriv
@@ -158,11 +162,59 @@ class PairScanner:
                 strategy.add_tick(price)
                 
                 self.tick_counts[symbol] = self.tick_counts.get(symbol, 0) + 1
+                tick_count = self.tick_counts[symbol]
+                
+            if tick_count % self.PRUNE_INTERVAL == 0:
+                self._prune_old_data(symbol)
                 
             logger.debug(f"Tick {symbol}: {price} (count: {self.tick_counts.get(symbol, 0)})")
                 
         except Exception as e:
             logger.error(f"Error processing tick for {symbol}: {e}")
+            
+    def _prune_old_data(self, symbol: str) -> None:
+        """
+        Periodic cleanup untuk strategy data.
+        
+        Reset strategy jika tick_count melebihi threshold untuk
+        mencegah memory bloat dari cached indicator data.
+        Juga membersihkan old analysis data dari symbol_data.
+        
+        Args:
+            symbol: Symbol identifier untuk di-prune
+        """
+        try:
+            with self._lock:
+                tick_count = self.tick_counts.get(symbol, 0)
+                
+                if tick_count > self.TICK_PRUNE_THRESHOLD:
+                    strategy = self.strategies.get(symbol)
+                    if strategy:
+                        old_tick_len = len(strategy.tick_history)
+                        strategy.clear_history()
+                        
+                        self.tick_counts[symbol] = 0
+                        
+                        self.symbol_data[symbol] = {
+                            "last_analysis": None,
+                            "last_score": 0.0,
+                            "last_update": None
+                        }
+                        
+                        logger.info(
+                            f"🧹 Pruned {symbol}: reset after {tick_count} ticks "
+                            f"(had {old_tick_len} in history)"
+                        )
+                else:
+                    symbol_info = self.symbol_data.get(symbol)
+                    if symbol_info and symbol_info.get("last_update"):
+                        age = time.time() - symbol_info["last_update"]
+                        if age > 300:
+                            self.symbol_data[symbol]["last_analysis"] = None
+                            logger.debug(f"Cleared stale analysis for {symbol} (age: {age:.0f}s)")
+                            
+        except Exception as e:
+            logger.warning(f"Error pruning data for {symbol}: {e}")
             
     def _preload_historical_data(self) -> int:
         """
