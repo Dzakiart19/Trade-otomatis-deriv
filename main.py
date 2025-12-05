@@ -45,6 +45,8 @@ from symbols import (
     get_symbol_list_text
 )
 
+USD_TO_IDR = 15800
+
 load_dotenv()
 
 logging.basicConfig(
@@ -113,11 +115,13 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account_type = deriv_ws.current_account_type.value.upper()
     
     if account_info:
+        balance_idr = account_info.balance * USD_TO_IDR
         account_text = (
             f"💼 **INFORMASI AKUN**\n\n"
             f"• Tipe: {account_type} {'🎮' if account_info.is_virtual else '💵'}\n"
             f"• ID: `{account_info.account_id}`\n"
             f"• Saldo: **${account_info.balance:.2f}** {account_info.currency}\n"
+            f"• Saldo IDR: **Rp {balance_idr:,.0f}**\n"
         )
     else:
         account_text = "❌ Gagal mendapatkan info akun."
@@ -233,17 +237,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws_status = "✅ Terkoneksi"
         account_type = deriv_ws.current_account_type.value.upper()
         balance = deriv_ws.get_balance()
+        balance_idr = balance * USD_TO_IDR
     else:
         ws_status = "❌ Terputus"
         account_type = "N/A"
         balance = 0
+        balance_idr = 0
         
     status_text = (
         f"📡 **STATUS BOT**\n\n"
         f"**Koneksi:**\n"
         f"• WebSocket: {ws_status}\n"
         f"• Akun: {account_type}\n"
-        f"• Saldo: ${balance:.2f}\n\n"
+        f"• Saldo: ${balance:.2f} (Rp {balance_idr:,.0f})\n\n"
     )
     
     if trading_manager:
@@ -307,12 +313,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if deriv_ws and deriv_ws.account_info:
             account_info = deriv_ws.account_info
             account_type = deriv_ws.current_account_type.value.upper()
+            balance_idr = account_info.balance * USD_TO_IDR
             
             account_text = (
                 f"💼 **INFORMASI AKUN**\n\n"
                 f"• Tipe: {account_type} {'🎮' if account_info.is_virtual else '💵'}\n"
                 f"• ID: `{account_info.account_id}`\n"
                 f"• Saldo: **${account_info.balance:.2f}** {account_info.currency}\n"
+                f"• Saldo IDR: **Rp {balance_idr:,.0f}**\n"
             )
         else:
             account_text = "❌ Akun belum terkoneksi."
@@ -357,18 +365,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [
-                InlineKeyboardButton("R_100 (Default)", callback_data="sym_R_100"),
-                InlineKeyboardButton("R_75", callback_data="sym_R_75")
+                InlineKeyboardButton("R_100 (Default)", callback_data="sym~R_100"),
+                InlineKeyboardButton("R_75", callback_data="sym~R_75")
             ],
             [
-                InlineKeyboardButton("R_50", callback_data="sym_R_50"),
-                InlineKeyboardButton("R_25", callback_data="sym_R_25")
+                InlineKeyboardButton("R_50", callback_data="sym~R_50"),
+                InlineKeyboardButton("R_25", callback_data="sym~R_25")
             ],
             [
-                InlineKeyboardButton("1HZ100V (1s)", callback_data="sym_1HZ100V"),
-                InlineKeyboardButton("1HZ75V (1s)", callback_data="sym_1HZ75V")
+                InlineKeyboardButton("1HZ100V (1s)", callback_data="sym~1HZ100V"),
+                InlineKeyboardButton("1HZ75V (1s)", callback_data="sym~1HZ75V")
             ],
-            [InlineKeyboardButton("🥇 XAUUSD (HARIAN SAJA!)", callback_data="sym_frxXAUUSD")],
+            [InlineKeyboardButton("🥇 XAUUSD (HARIAN SAJA!)", callback_data="sym~frxXAUUSD")],
             [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
         ]
         await query.edit_message_text(
@@ -377,22 +385,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
-    elif data.startswith("sym_"):
+    elif data.startswith("sym~"):
         symbol = data[4:]
         config = get_symbol_config(symbol)
         if config:
             if config.supports_ticks:
                 duration_options = [
                     [
-                        InlineKeyboardButton("5 ticks", callback_data=f"trade_{symbol}_5t"),
-                        InlineKeyboardButton("10 ticks", callback_data=f"trade_{symbol}_10t")
+                        InlineKeyboardButton("5 ticks", callback_data=f"trade~{symbol}~5t"),
+                        InlineKeyboardButton("10 ticks", callback_data=f"trade~{symbol}~10t")
                     ]
                 ]
             else:
                 duration_options = [
                     [
-                        InlineKeyboardButton("1 hari", callback_data=f"trade_{symbol}_1d"),
-                        InlineKeyboardButton("7 hari", callback_data=f"trade_{symbol}_7d")
+                        InlineKeyboardButton("1 hari", callback_data=f"trade~{symbol}~1d"),
+                        InlineKeyboardButton("7 hari", callback_data=f"trade~{symbol}~7d")
                     ]
                 ]
             
@@ -413,8 +421,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             
-    elif data.startswith("trade_"):
-        parts = data.split("_")
+    elif data.startswith("trade~"):
+        parts = data.split("~")
         if len(parts) >= 3:
             symbol = parts[1]
             duration_str = parts[2]
@@ -428,14 +436,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = [
                 [
-                    InlineKeyboardButton("$0.50 | 5x", callback_data=f"exec_{symbol}_{duration_str}_050_5"),
-                    InlineKeyboardButton("$0.50 | 10x", callback_data=f"exec_{symbol}_{duration_str}_050_10")
+                    InlineKeyboardButton("$0.50 | 5x", callback_data=f"exec~{symbol}~{duration_str}~050~5"),
+                    InlineKeyboardButton("$0.50 | 10x", callback_data=f"exec~{symbol}~{duration_str}~050~10")
                 ],
                 [
-                    InlineKeyboardButton("$1 | 5x", callback_data=f"exec_{symbol}_{duration_str}_1_5"),
-                    InlineKeyboardButton("$1 | ∞", callback_data=f"exec_{symbol}_{duration_str}_1_0")
+                    InlineKeyboardButton("$1 | 5x", callback_data=f"exec~{symbol}~{duration_str}~1~5"),
+                    InlineKeyboardButton("$1 | ∞", callback_data=f"exec~{symbol}~{duration_str}~1~0")
                 ],
-                [InlineKeyboardButton("« Kembali", callback_data=f"sym_{symbol}")]
+                [InlineKeyboardButton("« Kembali", callback_data=f"sym~{symbol}")]
             ]
             await query.edit_message_text(
                 trade_setup,
@@ -443,17 +451,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             
-    elif data.startswith("exec_"):
-        parts = data.split("_")
+    elif data.startswith("exec~"):
+        parts = data.split("~")
         if len(parts) >= 5 and trading_manager:
             symbol = parts[1]
             duration_str = parts[2]
             stake_str = parts[3]
             target_str = parts[4]
             
-            stake = float(stake_str.replace("0", "0.")) if stake_str.startswith("0") else float(stake_str)
             if stake_str == "050":
                 stake = 0.50
+            else:
+                try:
+                    stake = float(stake_str)
+                except ValueError:
+                    stake = MIN_STAKE_GLOBAL
             target = int(target_str)
             
             duration, duration_unit = trading_manager.parse_duration(duration_str)
@@ -480,12 +492,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [
-                InlineKeyboardButton("$0.50 | 5t | 5x", callback_data="exec_R_100_5t_050_5"),
-                InlineKeyboardButton("$0.50 | 5t | 10x", callback_data="exec_R_100_5t_050_10")
+                InlineKeyboardButton("$0.50 | 5t | 5x", callback_data="exec~R_100~5t~050~5"),
+                InlineKeyboardButton("$0.50 | 5t | 10x", callback_data="exec~R_100~5t~050~10")
             ],
             [
-                InlineKeyboardButton("$1 | 5t | 5x", callback_data="exec_R_100_5t_1_5"),
-                InlineKeyboardButton("$0.50 | 5t | ∞", callback_data="exec_R_100_5t_050_0")
+                InlineKeyboardButton("$1 | 5t | 5x", callback_data="exec~R_100~5t~1~5"),
+                InlineKeyboardButton("$0.50 | 5t | ∞", callback_data="exec~R_100~5t~050~0")
             ],
             [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
         ]
@@ -548,8 +560,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "akun_refresh":
         if deriv_ws and deriv_ws.account_info:
             balance = deriv_ws.get_balance()
+            balance_idr = balance * USD_TO_IDR
             await query.edit_message_text(
-                f"💰 Saldo terkini: **${balance:.2f}**",
+                f"💰 Saldo terkini:\n\n"
+                f"• USD: **${balance:.2f}**\n"
+                f"• IDR: **Rp {balance_idr:,.0f}**",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("« Kembali", callback_data="menu_akun")]
@@ -618,11 +633,12 @@ def setup_trading_callbacks(app: Application):
                        trade_num: int, target: int):
         """Callback saat posisi dibuka"""
         target_text = f"/{target}" if target > 0 else ""
+        stake_idr = stake * USD_TO_IDR
         message = (
             f"⏳ **ENTRY** (Trade {trade_num}{target_text})\n\n"
             f"• Tipe: {contract_type}\n"
             f"• Entry: {price:.5f}\n"
-            f"• Stake: ${stake:.2f}"
+            f"• Stake: ${stake:.2f} (Rp {stake_idr:,.0f})"
         )
         try:
             loop = asyncio.get_running_loop()
@@ -634,19 +650,22 @@ def setup_trading_callbacks(app: Application):
                        trade_num: int, target: int, next_stake: float):
         """Callback saat posisi ditutup (win/loss)"""
         target_text = f"/{target}" if target > 0 else ""
+        profit_idr = profit * USD_TO_IDR
+        balance_idr = balance * USD_TO_IDR
+        next_stake_idr = next_stake * USD_TO_IDR
         
         if is_win:
             message = (
                 f"✅ **WIN** (Trade {trade_num}{target_text})\n\n"
-                f"• Profit: +${profit:.2f}\n"
-                f"• Saldo: ${balance:.2f}"
+                f"• Profit: +${profit:.2f} (Rp {profit_idr:,.0f})\n"
+                f"• Saldo: ${balance:.2f} (Rp {balance_idr:,.0f})"
             )
         else:
             message = (
                 f"❌ **LOSS** (Trade {trade_num}{target_text})\n\n"
-                f"• Loss: -${abs(profit):.2f}\n"
-                f"• Saldo: ${balance:.2f}\n"
-                f"• Next Stake: ${next_stake:.2f} (Martingale)"
+                f"• Loss: -${abs(profit):.2f} (Rp {abs(profit_idr):,.0f})\n"
+                f"• Saldo: ${balance:.2f} (Rp {balance_idr:,.0f})\n"
+                f"• Next Stake: ${next_stake:.2f} (Rp {next_stake_idr:,.0f})"
             )
             
         try:
@@ -659,13 +678,14 @@ def setup_trading_callbacks(app: Application):
                            profit: float, win_rate: float):
         """Callback saat session selesai"""
         profit_emoji = "📈" if profit >= 0 else "📉"
+        profit_idr = profit * USD_TO_IDR
         message = (
             f"🏁 **SESSION COMPLETE**\n\n"
             f"📊 Statistik:\n"
             f"• Total: {total} trades\n"
             f"• Win/Loss: {wins}/{losses}\n"
             f"• Win Rate: {win_rate:.1f}%\n\n"
-            f"{profit_emoji} Net P/L: ${profit:+.2f}"
+            f"{profit_emoji} Net P/L: ${profit:+.2f} (Rp {profit_idr:+,.0f})"
         )
         try:
             loop = asyncio.get_running_loop()

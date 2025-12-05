@@ -179,6 +179,11 @@ python test_real_trade.py
    - Validasi durasi otomatis berdasarkan symbol
    - Konfigurasi terpusat di symbols.py
 
+6. **IDR Currency Conversion**: Tampilan saldo dalam Rupiah
+   - Saldo ditampilkan dalam USD dan IDR
+   - Profit/Loss juga dalam IDR
+   - Kurs: 1 USD = Rp 15,800
+
 ## Disclaimer
 
 Trading memiliki risiko tinggi. Bot ini untuk tujuan edukasi. Gunakan akun demo untuk testing sebelum menggunakan uang asli.
