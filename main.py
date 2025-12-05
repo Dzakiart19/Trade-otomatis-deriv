@@ -52,6 +52,7 @@ from symbols import (
     get_long_term_symbols,
     get_symbol_list_text
 )
+from user_auth import auth_manager, UserAuthManager
 
 USD_TO_IDR = 15800
 CHAT_ID_FILE = "logs/active_chat_id.txt"
@@ -161,7 +162,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /akun"""
     global deriv_ws
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    if not auth_manager.is_authenticated(user_id):
+        await update.message.reply_text(
+            "🔒 **AKSES DITOLAK**\n\n"
+            "Anda belum login. Gunakan /login terlebih dahulu.",
+            parse_mode="Markdown"
+        )
         return
     
     if not deriv_ws or not deriv_ws.is_ready():
@@ -205,7 +215,16 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /autotrade [stake] [durasi] [target] [symbol]"""
     global trading_manager
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    if not auth_manager.is_authenticated(user_id):
+        await update.message.reply_text(
+            "🔒 **AKSES DITOLAK**\n\n"
+            "Anda belum login. Gunakan /login terlebih dahulu.",
+            parse_mode="Markdown"
+        )
         return
     
     if not trading_manager:
@@ -275,7 +294,16 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /stop"""
     global trading_manager
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    if not auth_manager.is_authenticated(user_id):
+        await update.message.reply_text(
+            "🔒 **AKSES DITOLAK**\n\n"
+            "Anda belum login. Gunakan /login terlebih dahulu.",
+            parse_mode="Markdown"
+        )
         return
     
     if not trading_manager:
@@ -289,7 +317,16 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /status"""
     global deriv_ws, trading_manager
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    if not auth_manager.is_authenticated(user_id):
+        await update.message.reply_text(
+            "🔒 **AKSES DITOLAK**\n\n"
+            "Anda belum login. Gunakan /login terlebih dahulu.",
+            parse_mode="Markdown"
+        )
         return
     
     if deriv_ws and deriv_ws.is_ready():
@@ -369,6 +406,152 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /login - Mulai proses login dengan pilih akun Demo/Real"""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    
+    if auth_manager.is_authenticated(user_id):
+        user_info = auth_manager.get_user_info(user_id)
+        if user_info:
+            await update.message.reply_text(
+                f"✅ Anda sudah login!\n\n"
+                f"• Tipe: {user_info['account_type'].upper()}\n"
+                f"• Token ID: ...{user_info['token_fingerprint'][-8:]}\n\n"
+                f"Gunakan /logout untuk keluar, atau /autotrade untuk trading.",
+                parse_mode="Markdown"
+            )
+            return
+    
+    is_locked, remaining = auth_manager.is_locked_out(user_id)
+    if is_locked:
+        await update.message.reply_text(
+            f"🔒 **AKUN TERKUNCI**\n\n"
+            f"Terlalu banyak percobaan gagal.\n"
+            f"Coba lagi dalam {remaining} detik.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    login_text = (
+        "🔐 **LOGIN KE DERIV**\n\n"
+        "Pilih tipe akun yang ingin Anda gunakan:\n\n"
+        "• **DEMO** 🎮 - Akun virtual untuk latihan\n"
+        "• **REAL** 💵 - Akun dengan uang asli\n\n"
+        "⚠️ *Token Anda akan dienkripsi dan disimpan dengan aman.*"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("🎮 DEMO", callback_data="login_demo"),
+            InlineKeyboardButton("💵 REAL", callback_data="login_real")
+        ],
+        [InlineKeyboardButton("❌ Batal", callback_data="login_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        login_text,
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+
+
+async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /logout - Logout dari akun"""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    success, message = auth_manager.logout(user_id)
+    
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+
+async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /whoami - Tampilkan info user yang login"""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    
+    if not auth_manager.is_authenticated(user_id):
+        await update.message.reply_text(
+            "🔒 Anda belum login.\n\nGunakan /login untuk masuk dengan token Deriv.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    user_info = auth_manager.get_user_info(user_id)
+    if not user_info:
+        await update.message.reply_text("❌ Gagal mendapatkan info user.")
+        return
+    
+    whoami_text = (
+        f"👤 **INFO AKUN ANDA**\n\n"
+        f"• User ID: `{user_info['user_id']}`\n"
+        f"• Username: @{user_info['username'] or 'N/A'}\n"
+        f"• Tipe Akun: **{user_info['account_type'].upper()}** "
+        f"{'🎮' if user_info['account_type'] == 'demo' else '💵'}\n"
+        f"• Token ID: `...{user_info['token_fingerprint'][-8:]}`\n"
+        f"• Login: {user_info['created_at'][:19]}\n"
+        f"• Terakhir aktif: {user_info['last_used'][:19]}"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("👋 Logout", callback_data="confirm_logout")],
+        [InlineKeyboardButton("🔄 Switch Akun", callback_data="switch_account")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        whoami_text,
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+
+
+async def token_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk menerima token dari user saat proses login"""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    
+    if not message_text:
+        return
+    
+    if message_text.startswith('/'):
+        return
+    
+    if not auth_manager.has_pending_login(user_id):
+        return
+    
+    try:
+        await update.message.delete()
+        logger.info(f"🗑️ Token message deleted for user {user_id} (security)")
+    except Exception as e:
+        logger.warning(f"Could not delete token message: {e}")
+        await update.message.reply_text(
+            "⚠️ *Tidak bisa menghapus pesan token. Harap hapus manual untuk keamanan.*",
+            parse_mode="Markdown"
+        )
+    
+    success, result_msg = auth_manager.complete_login(user_id, message_text)
+    
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=result_msg,
+        parse_mode="Markdown"
+    )
+    
+    if success:
+        logger.info(f"✅ User {user_id} logged in successfully")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk semua inline button callbacks"""
     global deriv_ws, trading_manager, pair_scanner, active_chat_id, chat_id_confirmed
@@ -388,7 +571,89 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
-    if data == "menu_akun":
+    if data == "login_demo" or data == "login_real":
+        user_id = query.from_user.id if query.from_user else None
+        if not user_id:
+            await query.edit_message_text("❌ Error: User tidak teridentifikasi.")
+            return
+        
+        account_type = "demo" if data == "login_demo" else "real"
+        username = query.from_user.username if query.from_user else None
+        
+        if not auth_manager.start_login(user_id, username, account_type):
+            is_locked, remaining = auth_manager.is_locked_out(user_id)
+            await query.edit_message_text(
+                f"🔒 **AKUN TERKUNCI**\n\n"
+                f"Terlalu banyak percobaan gagal.\n"
+                f"Coba lagi dalam {remaining} detik.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        token_request_text = (
+            f"🔑 **MASUKKAN TOKEN {account_type.upper()}**\n\n"
+            f"Kirim token API Deriv Anda untuk akun **{account_type.upper()}**.\n\n"
+            f"📍 Cara mendapatkan token:\n"
+            f"1. Login ke deriv.com\n"
+            f"2. Buka Settings → API Token\n"
+            f"3. Buat token baru dengan scope 'Trade'\n"
+            f"4. Copy dan kirim token ke sini\n\n"
+            f"⚠️ *Token akan otomatis dihapus setelah diterima untuk keamanan.*"
+        )
+        
+        keyboard = [[InlineKeyboardButton("❌ Batal", callback_data="login_cancel")]]
+        
+        await query.edit_message_text(
+            token_request_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data == "login_cancel":
+        user_id = query.from_user.id if query.from_user else None
+        if user_id:
+            auth_manager.cancel_login(user_id)
+        
+        await query.edit_message_text(
+            "❌ Login dibatalkan.\n\nGunakan /login untuk mencoba lagi.",
+            parse_mode="Markdown"
+        )
+        
+    elif data == "confirm_logout":
+        user_id = query.from_user.id if query.from_user else None
+        if not user_id:
+            await query.edit_message_text("❌ Error: User tidak teridentifikasi.")
+            return
+        
+        success, message = auth_manager.logout(user_id)
+        await query.edit_message_text(message, parse_mode="Markdown")
+        
+    elif data == "switch_account":
+        user_id = query.from_user.id if query.from_user else None
+        if user_id:
+            auth_manager.logout(user_id)
+        
+        login_text = (
+            "🔄 **SWITCH AKUN**\n\n"
+            "Akun sebelumnya telah di-logout.\n"
+            "Pilih tipe akun baru:\n"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🎮 DEMO", callback_data="login_demo"),
+                InlineKeyboardButton("💵 REAL", callback_data="login_real")
+            ],
+            [InlineKeyboardButton("❌ Batal", callback_data="login_cancel")]
+        ]
+        
+        await query.edit_message_text(
+            login_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data == "menu_akun":
         if deriv_ws and deriv_ws.account_info:
             account_info = deriv_ws.account_info
             account_type = deriv_ws.current_account_type.value.upper()
