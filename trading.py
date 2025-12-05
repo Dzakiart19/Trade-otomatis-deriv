@@ -362,6 +362,45 @@ class TradingManager:
         self.ws.on_buy_response_callback = self._on_buy_response
         self.ws.on_contract_update_callback = self._on_contract_update
         self.ws.on_balance_update_callback = self._on_balance_update
+    
+    def _preload_historical_data(self) -> bool:
+        """
+        Pre-load historical tick data untuk symbol yang dipilih.
+        
+        Mengambil historical ticks dari Deriv API dan memasukkannya
+        ke strategy sehingga analisis bisa langsung dimulai tanpa
+        menunggu tick terkumpul.
+        
+        Returns:
+            True jika preload berhasil, False jika gagal
+        """
+        import time as time_module
+        
+        required_ticks = self.required_ticks + 30  # Extra buffer untuk indicator calculation
+        
+        logger.info(f"📥 Pre-loading {required_ticks} historical ticks for {self.symbol}...")
+        
+        try:
+            prices = self.ws.get_ticks_history(
+                symbol=self.symbol,
+                count=required_ticks,
+                timeout=15.0
+            )
+            
+            if prices and len(prices) >= self.required_ticks:
+                for price in prices:
+                    self.strategy.add_tick(float(price))
+                
+                logger.info(f"✅ Pre-loaded {len(prices)} ticks for {self.symbol} - siap trading!")
+                return True
+            else:
+                ticks_received = len(prices) if prices else 0
+                logger.warning(f"⚠️ Insufficient history for {self.symbol}: {ticks_received}/{required_ticks} ticks")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error pre-loading {self.symbol}: {e}")
+            return False
         
     def _get_adaptive_martingale_multiplier(self) -> float:
         """
@@ -1748,7 +1787,10 @@ class TradingManager:
         # Clear strategy history untuk fresh analysis
         self.strategy.clear_history()
         
-        # Subscribe ke ticks
+        # Pre-load historical data agar langsung siap trading
+        preload_success = self._preload_historical_data()
+        
+        # Subscribe ke ticks untuk data real-time
         self.ws.subscribe_ticks(self.symbol)
         
         # Update state
@@ -1756,13 +1798,26 @@ class TradingManager:
         
         target_text = f"{self.target_trades}" if self.target_trades > 0 else "∞"
         
+        # Cek status data setelah preload
+        strategy_stats = self.strategy.get_stats()
+        tick_count = strategy_stats.get('tick_count', 0)
+        rsi_value = strategy_stats.get('rsi', 0)
+        
+        if preload_success and tick_count >= self.required_ticks:
+            status_msg = f"✅ Data siap ({tick_count} ticks) - Signal analysis aktif!"
+            ready_status = "SIAP TRADING"
+        else:
+            status_msg = f"⏳ Melengkapi data ({tick_count}/{self.required_ticks} ticks)..."
+            ready_status = "LOADING DATA"
+        
         return (f"🚀 **AUTO TRADING STARTED**\n\n"
                 f"• Symbol: {self.symbol}\n"
                 f"• Stake: ${self.base_stake}\n"
                 f"• Durasi: {self.duration}{self.duration_unit}\n"
                 f"• Target: {target_text} trades\n"
                 f"• Saldo Awal: ${self.stats.starting_balance:.2f}\n\n"
-                f"⏳ Mengumpulkan data tick untuk analisis RSI...")
+                f"📊 **Status:** {ready_status}\n"
+                f"{status_msg}")
                 
     def stop(self) -> str:
         """
@@ -1774,8 +1829,8 @@ class TradingManager:
         if self.state == TradingState.IDLE or self.state == TradingState.STOPPED:
             return "⚠️ Auto trading tidak sedang berjalan."
             
-        # Unsubscribe dari ticks
-        self.ws.unsubscribe_ticks()
+        # Unsubscribe dari ticks untuk symbol yang sedang di-trade
+        self.ws.unsubscribe_ticks(self.symbol)
         
         # Update state
         self.state = TradingState.STOPPED
