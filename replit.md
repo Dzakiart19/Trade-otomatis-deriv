@@ -64,6 +64,14 @@ Do not make changes to the file `Y`.
     - **Stake Preservation**: Stake martingale dipertahankan di configure(), start(), dan risk check
     - **Telegram Message Fallback**: Helper function untuk handle Markdown parsing error dengan fallback ke HTML/plain text
     - **Session Recovery Validation**: Validasi umur file (30 menit max), data integrity check, dan martingale level validation
+- **Stability & Performance Fixes (v3.0)**:
+    - **WebSocket Memory Leak Fix**: `_cleanup_pending_requests()` method untuk cleanup expired pending requests setiap 60 detik via health check
+    - **Thread Safety**: `is_connected` flag dijadikan thread-safe dengan `_is_connected_lock` dan property getter/setter
+    - **Martingale Balance Guard**: Balance check dipindahkan SEBELUM calculate martingale stake untuk prevent over-betting
+    - **CSV Data Durability**: Tambah `os.fsync()` sebelum atomic rename untuk memastikan data tersimpan ke disk
+    - **O(1) Indicator Calculation**: `calculate_ema_incremental()` dan `calculate_macd_incremental()` dengan caching (sebelumnya O(n²))
+    - **PairScanner Pruning**: `_prune_old_data()` untuk cleanup strategy data setiap 10000 ticks per symbol
+    - **SESSION_SECRET Persistence**: Session key disimpan ke file `.session_secret` jika tidak ada di environment (dilindungi .gitignore)
 
 ### Feature Specifications
 - **Supported Symbols**: Volatility indices (R_100, R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V) for 5-10 ticks duration, and frxXAUUSD (Gold/USD) for daily duration.
