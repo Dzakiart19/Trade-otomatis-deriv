@@ -73,9 +73,11 @@ chat_id_confirmed: bool = False
 shutdown_requested: bool = False
 last_progress_notification_time: float = 0.0
 MIN_NOTIFICATION_INTERVAL: float = 10.0
+current_connected_user_id: Optional[int] = None
 
 import threading
 _chat_id_lock = threading.Lock()
+_deriv_lock = threading.Lock()
 
 _last_message_hashes: Dict[str, float] = {}
 _MESSAGE_HASH_TTL: int = 60
@@ -116,9 +118,91 @@ def load_chat_id() -> Optional[int]:
         return None
 
 
+def connect_user_deriv(user_id: int) -> tuple[bool, str]:
+    """
+    Koneksi atau reconnect WebSocket dengan token user yang sudah login.
+    
+    Args:
+        user_id: Telegram user ID
+        
+    Returns:
+        (success, message)
+    """
+    global deriv_ws, trading_manager, pair_scanner, current_connected_user_id
+    
+    with _deriv_lock:
+        user_token = auth_manager.get_user_token(user_id)
+        account_type = auth_manager.get_user_account_type(user_id)
+        
+        if not user_token:
+            logger.error(f"❌ No token found for user {user_id}")
+            return False, "Token tidak ditemukan. Silakan login ulang."
+        
+        if not account_type:
+            account_type = "demo"
+        
+        logger.info(f"🔌 Connecting Deriv for user {user_id} ({account_type})")
+        
+        if deriv_ws and deriv_ws.is_connected:
+            try:
+                deriv_ws.disconnect()
+                logger.info("📴 Previous WebSocket disconnected")
+            except Exception as e:
+                logger.warning(f"Error disconnecting previous WS: {e}")
+        
+        try:
+            if account_type.lower() == "demo":
+                deriv_ws = DerivWebSocket(
+                    demo_token=user_token,
+                    real_token=""
+                )
+                deriv_ws.current_account_type = AccountType.DEMO
+            else:
+                deriv_ws = DerivWebSocket(
+                    demo_token="",
+                    real_token=user_token
+                )
+                deriv_ws.current_account_type = AccountType.REAL
+            
+            if deriv_ws.connect():
+                if deriv_ws.wait_until_ready(timeout=45):
+                    logger.info("✅ Deriv WebSocket connected and authorized!")
+                    
+                    trading_manager = TradingManager(deriv_ws)
+                    
+                    pair_scanner = PairScanner(deriv_ws)
+                    pair_scanner.start_scanning()
+                    
+                    current_connected_user_id = user_id
+                    
+                    if deriv_ws.account_info:
+                        logger.info(f"   Account: {deriv_ws.account_info.account_id}")
+                        logger.info(f"   Balance: {deriv_ws.account_info.balance} {deriv_ws.account_info.currency}")
+                        
+                    return True, "Koneksi berhasil!"
+                else:
+                    error_msg = deriv_ws.get_last_auth_error() if hasattr(deriv_ws, 'get_last_auth_error') else "Unknown"
+                    logger.error(f"❌ Authorization timeout. Error: {error_msg}")
+                    return False, f"Gagal otorisasi: {error_msg}"
+            else:
+                logger.error("❌ Failed to connect to Deriv WebSocket")
+                return False, "Gagal koneksi ke Deriv"
+                
+        except Exception as e:
+            logger.error(f"❌ Exception during connection: {type(e).__name__}: {e}")
+            return False, f"Error: {str(e)}"
+
+
+async def connect_user_deriv_async(user_id: int) -> tuple[bool, str]:
+    """Async wrapper untuk connect_user_deriv"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, connect_user_deriv, user_id)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
-    global active_chat_id, chat_id_confirmed
+    global active_chat_id, chat_id_confirmed, deriv_ws, current_connected_user_id
     if not update.effective_chat or not update.message or not update.effective_user:
         return
     
@@ -133,6 +217,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_logged_in = auth_manager.is_authenticated(user_id)
     
     if is_logged_in:
+        needs_connect = (
+            not deriv_ws or 
+            not deriv_ws.is_ready() or 
+            current_connected_user_id != user_id
+        )
+        
+        if needs_connect:
+            await update.message.reply_text(
+                "🔄 Menghubungkan ke Deriv...\n\nMohon tunggu sebentar.",
+                parse_mode="Markdown"
+            )
+            
+            success, msg = await connect_user_deriv_async(user_id)
+            
+            if not success:
+                await update.message.reply_text(
+                    f"❌ **Gagal koneksi ke Deriv**\n\n{msg}\n\n"
+                    "Coba /login untuk login ulang dengan token baru.",
+                    parse_mode="Markdown"
+                )
+                return
         user_info = auth_manager.get_user_info(user_id)
         account_type = user_info['account_type'].upper() if user_info else "UNKNOWN"
         account_emoji = "🎮" if account_type == "DEMO" else "💵"
@@ -574,14 +679,49 @@ async def token_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     
     success, result_msg = auth_manager.complete_login(user_id, message_text)
     
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+        chat_id=chat_id,
         text=result_msg,
         parse_mode="Markdown"
     )
     
     if success:
         logger.info(f"✅ User {user_id} logged in successfully")
+        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🔄 Menghubungkan ke Deriv...",
+            parse_mode="Markdown"
+        )
+        
+        connect_success, connect_msg = await connect_user_deriv_async(user_id)
+        
+        if connect_success:
+            balance_text = ""
+            if deriv_ws and deriv_ws.account_info:
+                balance = deriv_ws.account_info.balance
+                balance_idr = balance * USD_TO_IDR
+                balance_text = f"\n💰 Saldo: **${balance:.2f}** (Rp {balance_idr:,.0f})"
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ **Koneksi Berhasil!**{balance_text}\n\n"
+                     f"Gunakan /autotrade untuk mulai trading.\n"
+                     f"Atau ketik /start untuk menu utama.",
+                parse_mode="Markdown"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ **Login berhasil tapi koneksi gagal**\n\n"
+                     f"{connect_msg}\n\n"
+                     f"Ketik /start untuk mencoba koneksi ulang.",
+                parse_mode="Markdown"
+            )
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1566,76 +1706,46 @@ def shutdown_handler(signum, frame):
 
 
 def initialize_deriv():
-    """Inisialisasi koneksi Deriv WebSocket dengan retry dan error handling"""
-    global deriv_ws, trading_manager, pair_scanner
+    """
+    Inisialisasi koneksi Deriv WebSocket.
     
-    demo_token = os.environ.get("DERIV_TOKEN_DEMO", "")
-    real_token = os.environ.get("DERIV_TOKEN_REAL", "")
+    Strategi baru:
+    1. Cek apakah ada user session yang tersimpan
+    2. Jika ada, coba koneksi dengan token user pertama
+    3. Jika tidak ada, bot akan menunggu user login melalui /login
+    
+    Environment tokens (DERIV_TOKEN_DEMO/REAL) tidak lagi wajib.
+    """
+    global deriv_ws, trading_manager, pair_scanner, current_connected_user_id
     
     logger.info("=" * 50)
-    logger.info("INITIALIZING DERIV CONNECTION")
+    logger.info("INITIALIZING DERIV BOT")
     logger.info("=" * 50)
     
-    # Log token availability (tanpa expose token)
-    logger.info(f"Demo token available: {'Yes' if demo_token else 'No'}")
-    logger.info(f"Real token available: {'Yes' if real_token else 'No'}")
+    sessions = auth_manager.sessions
+    logger.info(f"📂 Found {len(sessions)} saved user sessions")
     
-    if not demo_token and not real_token:
-        logger.warning("⚠️ No Deriv tokens found in environment!")
-        logger.info("Please set DERIV_TOKEN_DEMO and/or DERIV_TOKEN_REAL in Replit Secrets")
-        logger.info("Bot akan tetap berjalan tapi tidak bisa trading.")
-        return False
-    
-    try:
-        deriv_ws = DerivWebSocket(
-            demo_token=demo_token,
-            real_token=real_token
-        )
+    if sessions:
+        first_user_id = list(sessions.keys())[0]
+        session = sessions[first_user_id]
+        logger.info(f"🔑 Found session for user {first_user_id} ({session.account_type})")
         
-        if deriv_ws.connect():
-            # Tunggu authorization dengan timeout
-            if deriv_ws.wait_until_ready(timeout=45):
-                logger.info("✅ Deriv WebSocket ready!")
-                trading_manager = TradingManager(deriv_ws)
-                
-                pair_scanner = PairScanner(deriv_ws)
-                if pair_scanner.start_scanning():
-                    logger.info("✅ Pair Scanner started successfully")
-                else:
-                    logger.warning("⚠️ Pair Scanner failed to start, will retry later")
-                
-                # Log account info
-                if deriv_ws.account_info:
-                    logger.info(f"   Account: {deriv_ws.account_info.account_id}")
-                    logger.info(f"   Balance: {deriv_ws.account_info.balance} {deriv_ws.account_info.currency}")
-                    logger.info(f"   Type: {'Demo' if deriv_ws.account_info.is_virtual else 'Real'}")
-                    
-                logger.info("=" * 50)
-                return True
-            else:
-                # Log detail error
-                logger.error("❌ Deriv WebSocket timeout waiting for authorization")
-                logger.error(f"   Connection state: {deriv_ws.get_connection_status()}")
-                logger.error(f"   Last error: {deriv_ws.get_last_auth_error()}")
-                logger.info("Bot akan tetap berjalan. Coba /akun untuk reconnect.")
-                logger.info("=" * 50)
-                
-                # Tetap buat trading manager untuk retry nanti
-                trading_manager = TradingManager(deriv_ws)
-                
-                # Tetap buat pair_scanner meski belum ready
-                pair_scanner = PairScanner(deriv_ws)
-                return False
+        success, msg = connect_user_deriv(first_user_id)
+        
+        if success:
+            logger.info("✅ Deriv connected with saved session!")
+            logger.info("=" * 50)
+            return True
         else:
-            logger.error("❌ Failed to connect to Deriv WebSocket")
-            logger.info("Periksa koneksi internet dan coba lagi.")
+            logger.warning(f"⚠️ Could not connect with saved session: {msg}")
+            logger.info("User dapat mencoba /start untuk reconnect")
             logger.info("=" * 50)
             return False
-            
-    except Exception as e:
-        logger.error(f"❌ Exception during Deriv initialization: {type(e).__name__}: {e}")
+    else:
+        logger.info("📋 No saved sessions found")
+        logger.info("🔐 Bot akan menunggu user login dengan /login atau /start")
         logger.info("=" * 50)
-        return False
+        return True
 
 
 def main():
