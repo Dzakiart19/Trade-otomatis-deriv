@@ -1,0 +1,29 @@
+Bertindaklah sebagai Senior Python Developer. Saya memiliki project Bot Trading Deriv yang sudah berjalan (90% selesai), namun ada beberapa inkonsistensi data, teks UI yang usang, dan hardcoded values yang perlu dirapikan agar menjadi "Production Ready".
+
+Tolong lakukan **UPDATE** dan **REFACTORING** pada 3 file berikut berdasarkan audit kode terakhir. JANGAN ubah logika inti yang sudah jalan (seperti RSI di strategy.py), fokus hanya pada perbaikan berikut:
+
+### 1. FILE: `main.py` (Update UI & Help Text)
+**Masalah:** Deriv telah menaikkan minimum stake XAUUSD menjadi **$0.50**, tapi UI bot masih menampilkan teks/tombol **$0.35**.
+**Instruksi:**
+- Cari semua string text, help message, dan label tombol yang menyebutkan "$0.35" atau "0.35".
+- Ubah menjadi "$0.50" atau "0.50" agar user tidak bingung.
+- Lokasi target (perkiraan baris): 245, 248, 311, 318, 323, 434.
+- **Penting:** Pastikan logika validasi input user juga menolak jika user memasukkan angka di bawah 0.50 untuk XAUUSD.
+
+### 2. FILE: `deriv_ws.py` (Remove Hardcoded Values)
+**Masalah:** Simbol `frxXAUUSD` ditulis manual (hardcoded) berulang kali di dalam parameter fungsi default. Ini buruk untuk maintenance.
+**Instruksi:**
+- Buat konstanta di bagian paling atas file, misal: `DEFAULT_SYMBOL = "frxXAUUSD"` dan `MIN_STAKE = 0.50`.
+- Ganti semua string manual "frxXAUUSD" di fungsi `get_contracts_for()`, `subscribe_ticks()`, dan `buy_contract()` dengan variabel `DEFAULT_SYMBOL` tersebut.
+- Lokasi target (perkiraan baris): 354, 372, 416.
+
+### 3. FILE: `trading.py` (Code Cleanup)
+**Masalah:** Komentar kode tidak akurat (Line 86).
+**Instruksi:**
+- Perbaiki komentar yang menyebut spesifik "XAUUSD" menjadi lebih general (misal: "current asset") jika fungsi tersebut sebenarnya bisa dipakai untuk pair lain, atau biarkan jika memang khusus XAUUSD tapi pastikan konteksnya benar.
+
+### TAMBAHAN PENTING (Best Practice):
+- Pastikan perubahan di `main.py` sinkron dengan `deriv_ws.py`. Jika `deriv_ws.py` menolak order di bawah $0.50, maka pesan error di `main.py` harus memberitahu user "Minimal Stake adalah $0.50".
+- Cek kembali apakah ada validasi `if stake < 0.35` di kode lama, dan ubah menjadi `if stake < 0.50`.
+
+Mohon berikan kode lengkap untuk file-file yang direvisi tersebut (`main.py`, `deriv_ws.py`, `trading.py`) agar saya bisa langsung replace.
