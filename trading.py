@@ -1708,15 +1708,21 @@ class TradingManager:
                     logger.info(f"📊 Stake ${stake:.2f} akan auto-adjust ke ${max_safe_stake:.2f} saat trading")
             
         self.base_stake = stake
-        self.current_stake = stake
+        
+        if self.in_martingale_sequence and self.current_stake > stake:
+            logger.info(f"📊 Martingale active: keeping stake ${self.current_stake:.2f} (not resetting to ${stake:.2f})")
+        else:
+            self.current_stake = stake
+            
         self.duration = duration
         self.duration_unit = duration_unit
         self.target_trades = target_trades
         
         target_text = f"{target_trades} trades" if target_trades > 0 else "Unlimited"
         
+        stake_display = self.current_stake if self.in_martingale_sequence else stake
         return (f"✅ Konfigurasi tersimpan:\n"
-                f"• Stake: ${stake}\n"
+                f"• Stake: ${stake_display:.2f}\n"
                 f"• Durasi: {duration}{duration_unit}\n"
                 f"• Target: {target_text}\n"
                 f"• Symbol: {symbol}")
@@ -1753,8 +1759,11 @@ class TradingManager:
             self.stats.lowest_balance = self.stats.starting_balance
             self.trade_history.clear()
             
-            # Reset stake ke base
-            self.current_stake = self.base_stake
+            # Reset stake ke base HANYA jika tidak dalam martingale sequence
+            if self.in_martingale_sequence and self.current_stake > self.base_stake:
+                logger.info(f"📊 Martingale active: keeping stake ${self.current_stake:.2f} for new session")
+            else:
+                self.current_stake = self.base_stake
         else:
             # Update current balance from websocket
             current_balance = self.ws.get_balance()
@@ -1772,8 +1781,8 @@ class TradingManager:
         self.last_notified_milestone = -1
         self.sent_milestones.clear()  # Reset sent milestones for new session
         
-        # Reset risk management counters (hanya jika tidak ada recovery)
-        if not session_restored:
+        # Reset risk management counters (hanya jika tidak ada recovery DAN tidak dalam martingale)
+        if not session_restored and not self.in_martingale_sequence:
             self.consecutive_losses = 0
         self.is_processing_signal = False
         self.signal_processing_start_time = 0.0
