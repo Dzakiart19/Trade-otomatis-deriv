@@ -109,7 +109,23 @@ class UserAuthManager:
             return decrypted.decode()
         except (InvalidToken, Exception) as e:
             logger.error(f"Failed to decrypt token: {e}")
+            logger.warning("⚠️ Token decryption failed - possibly SESSION_SECRET changed")
             return None
+    
+    def clear_invalid_session(self, user_id: int) -> bool:
+        """
+        Hapus session yang tidak valid (token tidak bisa didekripsi).
+        Dipanggil saat decryption gagal.
+        
+        Returns:
+            True jika session dihapus, False jika tidak ada session
+        """
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+            self._save_sessions()
+            logger.info(f"🗑️ Cleared invalid session for user {user_id}")
+            return True
+        return False
             
     def _get_token_fingerprint(self, token: str) -> str:
         """Generate fingerprint dari token untuk audit (tidak reversible)"""

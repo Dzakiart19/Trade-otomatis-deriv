@@ -136,7 +136,8 @@ def connect_user_deriv(user_id: int) -> tuple[bool, str]:
         
         if not user_token:
             logger.error(f"❌ No token found for user {user_id}")
-            return False, "Token tidak ditemukan. Silakan login ulang."
+            auth_manager.clear_invalid_session(user_id)
+            return False, "Token tidak ditemukan atau sudah expired. Silakan login ulang dengan /login."
         
         if not account_type:
             account_type = "demo"
