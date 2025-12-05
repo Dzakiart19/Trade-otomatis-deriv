@@ -28,9 +28,10 @@ Enhancement v2.2:
 =============================================================
 """
 
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime
 import logging
 import math
 
@@ -177,6 +178,15 @@ class TradingStrategy:
     - Dynamic volatility-based position sizing
     - RSI entry range validation
     - Enhanced confidence scoring
+    
+    Enhancement v2.3:
+    - Multi-timeframe trend confirmation (M5)
+    - EMA slope filter for trend direction
+    - Enhanced ADX directional conflict detection
+    - Volume filter estimation from price movements
+    - Price action confirmation with wick validation
+    - Signal cooldown system to prevent overtrading
+    - Confluence scoring for signal strength
     """
     
     RSI_PERIOD = 14
@@ -219,15 +229,26 @@ class TradingStrategy:
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
+    COOLDOWN_SECONDS = 30
+    VOLUME_HISTORY_SIZE = 20
+    EMA_SLOPE_LOOKBACK = 5
+    MIN_CONFLUENCE_SCORE = 50
+    
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
         self.tick_history: List[float] = []
         self.high_history: List[float] = []
         self.low_history: List[float] = []
         self.rsi_history: List[float] = []
+        self.ema_fast_history: List[float] = []
+        self.volume_history: List[float] = []
         self.last_indicators = IndicatorValues()
         self.total_tick_count = 0
         self._last_memory_log_time = 0
+        
+        self.last_buy_time: Optional[datetime] = None
+        self.last_sell_time: Optional[datetime] = None
+        self.last_signal_time: Optional[datetime] = None
         
     def add_tick(self, price: float) -> None:
         """
@@ -264,6 +285,12 @@ class TradingStrategy:
             
         self.high_history.append(high)
         self.low_history.append(low)
+        
+        if len(self.tick_history) > 1:
+            estimated_volume = abs(price - self.tick_history[-2])
+            self.volume_history.append(estimated_volume)
+            if len(self.volume_history) > self.VOLUME_HISTORY_SIZE:
+                self.volume_history = self.volume_history[-self.VOLUME_HISTORY_SIZE:]
         
         if len(self.tick_history) > self.MAX_TICK_HISTORY:
             self.tick_history = self.tick_history[-self.MAX_TICK_HISTORY:]
@@ -321,7 +348,13 @@ class TradingStrategy:
         self.high_history.clear()
         self.low_history.clear()
         self.rsi_history.clear()
+        self.ema_fast_history.clear()
+        self.volume_history.clear()
         self.last_indicators = IndicatorValues()
+        
+        self.last_buy_time = None
+        self.last_sell_time = None
+        self.last_signal_time = None
         
     def calculate_ema(self, prices: List[float], period: int) -> float:
         """
@@ -623,7 +656,12 @@ class TradingStrategy:
     
     def check_adx_filter(self, adx: float, plus_di: float, minus_di: float, 
                         signal_type: str) -> Tuple[bool, str, float]:
-        """Check ADX filter for trend strength.
+        """Check ADX filter for trend strength with enhanced directional conflict detection.
+        
+        Enhancement v2.3:
+        - Added +5 threshold for directional conflict detection
+        - BUY conflict: minus_di > plus_di + 5
+        - SELL conflict: plus_di > minus_di + 5
         
         Args:
             adx: Current ADX value
@@ -640,26 +678,40 @@ class TradingStrategy:
             return False, reason, 0.0
         
         directional_conflict = False
+        conflict_warning = False
         di_info = ""
         
         if plus_di > minus_di:
             di_info = f"+DI({plus_di:.1f}) > -DI({minus_di:.1f}) = Bullish"
             if signal_type == "SELL":
                 directional_conflict = True
+                if plus_di > minus_di + 5:
+                    conflict_warning = True
         elif minus_di > plus_di:
             di_info = f"-DI({minus_di:.1f}) > +DI({plus_di:.1f}) = Bearish"
             if signal_type == "BUY":
                 directional_conflict = True
+                if minus_di > plus_di + 5:
+                    conflict_warning = True
+        else:
+            di_info = f"+DI({plus_di:.1f}) ≈ -DI({minus_di:.1f}) = Neutral"
         
-        if directional_conflict and adx >= self.ADX_STRONG_TREND:
+        if conflict_warning:
             di_diff = abs(plus_di - minus_di)
             if di_diff >= 10:
-                reason = f"❌ ADX directional conflict: {signal_type} vs {di_info}"
+                reason = f"❌ ADX strong directional conflict: {signal_type} vs {di_info} (diff={di_diff:.1f})"
                 logger.debug(reason)
                 return False, reason, 0.0
             else:
-                reason = f"⚠️ ADX warning: {signal_type} vs {di_info}, TP reduced"
+                reason = f"⚠️ ADX directional conflict warning: {signal_type} vs {di_info} (diff={di_diff:.1f}), TP reduced to 0.7x"
+                logger.debug(reason)
                 return True, reason, 0.7
+        
+        if directional_conflict and adx >= self.ADX_STRONG_TREND:
+            di_diff = abs(plus_di - minus_di)
+            reason = f"⚠️ ADX minor conflict: {signal_type} vs {di_info} (diff={di_diff:.1f})"
+            logger.debug(reason)
+            return True, reason, 0.85
         
         if adx >= self.ADX_STRONG_TREND:
             reason = f"✅ ADX strong: {adx:.1f} >= {self.ADX_STRONG_TREND} | {di_info}"
@@ -757,6 +809,479 @@ class TradingStrategy:
                 return False, f"RSI not in SELL range ({rsi:.1f} not in {self.RSI_SELL_ENTRY_MIN}-{self.RSI_SELL_ENTRY_MAX})"
         
         return False, "Invalid signal type"
+    
+    def check_mtf_trend_confirmation(self, signal_type: str, 
+                                      m5_indicators: Optional[Dict[str, float]] = None
+                                      ) -> Tuple[bool, str, float]:
+        """Multi-Timeframe Trend Confirmation using M5 indicators.
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            m5_indicators: Optional dict with 'ema_fast', 'ema_slow', 'rsi' from M5 timeframe
+            
+        Returns:
+            Tuple of (is_aligned, reason, score_multiplier)
+            - is_aligned: True if M5 trend aligns with signal direction
+            - reason: Explanation string
+            - score_multiplier: 1.0-1.2 for aligned, 0.8-1.0 for neutral/conflict
+        """
+        if m5_indicators is None:
+            return True, "M5 data unavailable - proceeding", 1.0
+        
+        m5_ema_fast = safe_float(m5_indicators.get('ema_fast', 0), 0.0)
+        m5_ema_slow = safe_float(m5_indicators.get('ema_slow', 0), 0.0)
+        m5_rsi = safe_float(m5_indicators.get('rsi', 50), 50.0)
+        
+        if m5_ema_fast == 0 or m5_ema_slow == 0:
+            return True, "M5 EMA data incomplete - proceeding", 1.0
+        
+        if signal_type == "BUY":
+            ema_aligned = m5_ema_fast > m5_ema_slow
+            rsi_aligned = m5_rsi > 40
+            
+            if ema_aligned and rsi_aligned:
+                reason = f"✅ M5 aligned for BUY: EMA_f({m5_ema_fast:.2f}) > EMA_s({m5_ema_slow:.2f}), RSI({m5_rsi:.1f}) > 40"
+                logger.debug(reason)
+                return True, reason, 1.15
+            elif ema_aligned or rsi_aligned:
+                reason = f"⚠️ M5 partial alignment for BUY: EMA{'✓' if ema_aligned else '✗'}, RSI{'✓' if rsi_aligned else '✗'}"
+                logger.debug(reason)
+                return True, reason, 1.0
+            else:
+                reason = f"❌ M5 conflict for BUY: EMA_f({m5_ema_fast:.2f}) < EMA_s({m5_ema_slow:.2f}), RSI({m5_rsi:.1f}) < 40"
+                logger.debug(reason)
+                return False, reason, 0.85
+                
+        elif signal_type == "SELL":
+            ema_aligned = m5_ema_fast < m5_ema_slow
+            rsi_aligned = m5_rsi < 60
+            
+            if ema_aligned and rsi_aligned:
+                reason = f"✅ M5 aligned for SELL: EMA_f({m5_ema_fast:.2f}) < EMA_s({m5_ema_slow:.2f}), RSI({m5_rsi:.1f}) < 60"
+                logger.debug(reason)
+                return True, reason, 1.15
+            elif ema_aligned or rsi_aligned:
+                reason = f"⚠️ M5 partial alignment for SELL: EMA{'✓' if ema_aligned else '✗'}, RSI{'✓' if rsi_aligned else '✗'}"
+                logger.debug(reason)
+                return True, reason, 1.0
+            else:
+                reason = f"❌ M5 conflict for SELL: EMA_f({m5_ema_fast:.2f}) > EMA_s({m5_ema_slow:.2f}), RSI({m5_rsi:.1f}) > 60"
+                logger.debug(reason)
+                return False, reason, 0.85
+        
+        return True, "Invalid signal type - proceeding", 1.0
+    
+    def check_ema_slope(self, signal_type: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """EMA Slope Filter to detect trend direction from recent EMA values.
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            
+        Returns:
+            Tuple of (is_valid, reason, slope_data)
+            - is_valid: True if slope is favorable for signal direction
+            - reason: Explanation string
+            - slope_data: Dict with 'direction', 'slope_value', 'strength'
+        """
+        slope_data = {
+            'direction': 'flat',
+            'slope_value': 0.0,
+            'strength': 'neutral'
+        }
+        
+        if len(self.tick_history) < self.EMA_SLOW_PERIOD + self.EMA_SLOPE_LOOKBACK:
+            return True, "Insufficient data for EMA slope calculation", slope_data
+        
+        ema_values = []
+        lookback_range = min(self.EMA_SLOPE_LOOKBACK, len(self.tick_history) - self.EMA_FAST_PERIOD)
+        
+        for i in range(lookback_range):
+            end_idx = len(self.tick_history) - lookback_range + i + 1
+            subset = self.tick_history[:end_idx]
+            ema_val = self.calculate_ema(subset, self.EMA_FAST_PERIOD)
+            ema_values.append(ema_val)
+            
+        self.ema_fast_history = ema_values[-self.EMA_SLOPE_LOOKBACK:] if len(ema_values) >= self.EMA_SLOPE_LOOKBACK else ema_values
+        
+        if len(ema_values) < 2:
+            return True, "Not enough EMA values for slope", slope_data
+        
+        first_ema = ema_values[0]
+        last_ema = ema_values[-1]
+        
+        if first_ema <= 0:
+            return True, "Invalid EMA for slope calculation", slope_data
+        
+        slope_value = safe_divide((last_ema - first_ema) * 100, first_ema, 0.0)
+        slope_data['slope_value'] = round(slope_value, 4)
+        
+        slope_threshold = 0.01
+        strong_threshold = 0.05
+        
+        if slope_value > strong_threshold:
+            slope_data['direction'] = 'bullish'
+            slope_data['strength'] = 'strong'
+        elif slope_value > slope_threshold:
+            slope_data['direction'] = 'bullish'
+            slope_data['strength'] = 'moderate'
+        elif slope_value < -strong_threshold:
+            slope_data['direction'] = 'bearish'
+            slope_data['strength'] = 'strong'
+        elif slope_value < -slope_threshold:
+            slope_data['direction'] = 'bearish'
+            slope_data['strength'] = 'moderate'
+        else:
+            slope_data['direction'] = 'flat'
+            slope_data['strength'] = 'neutral'
+        
+        direction = slope_data['direction']
+        
+        if signal_type == "BUY":
+            if direction in ['bullish', 'flat']:
+                reason = f"✅ EMA slope OK for BUY: {direction} ({slope_value:.4f}%)"
+                logger.debug(reason)
+                return True, reason, slope_data
+            else:
+                reason = f"⚠️ EMA slope warning for BUY: {direction} ({slope_value:.4f}%)"
+                logger.debug(reason)
+                return False, reason, slope_data
+                
+        elif signal_type == "SELL":
+            if direction in ['bearish', 'flat']:
+                reason = f"✅ EMA slope OK for SELL: {direction} ({slope_value:.4f}%)"
+                logger.debug(reason)
+                return True, reason, slope_data
+            else:
+                reason = f"⚠️ EMA slope warning for SELL: {direction} ({slope_value:.4f}%)"
+                logger.debug(reason)
+                return False, reason, slope_data
+        
+        return True, "EMA slope check passed", slope_data
+    
+    def check_volume_filter(self) -> Tuple[bool, str, float]:
+        """Volume Filter based on estimated volume from price movements.
+        
+        Uses volume_history (last 20 ticks estimated from price changes).
+        
+        Returns:
+            Tuple of (is_valid, reason, confidence_multiplier)
+            - is_valid: True if volume is acceptable for trading
+            - reason: Explanation string
+            - confidence_multiplier: 0.8-1.2 based on volume strength
+        """
+        if len(self.volume_history) < 5:
+            return True, "Insufficient volume data - proceeding", 1.0
+        
+        current_volume = self.volume_history[-1] if self.volume_history else 0.0
+        avg_volume = safe_divide(sum(self.volume_history), len(self.volume_history), 0.0)
+        
+        if avg_volume <= 0:
+            return True, "No average volume - proceeding", 1.0
+        
+        volume_ratio = safe_divide(current_volume, avg_volume, 1.0)
+        
+        if volume_ratio > 1.5:
+            reason = f"🔥 Volume VERY STRONG: ratio={volume_ratio:.2f}x (current={current_volume:.6f}, avg={avg_volume:.6f})"
+            logger.debug(reason)
+            return True, reason, 1.2
+        elif volume_ratio > 1.2:
+            reason = f"✅ Volume STRONG: ratio={volume_ratio:.2f}x"
+            logger.debug(reason)
+            return True, reason, 1.15
+        elif volume_ratio > 0.8:
+            reason = f"✅ Volume NORMAL: ratio={volume_ratio:.2f}x"
+            logger.debug(reason)
+            return True, reason, 1.0
+        elif volume_ratio > 0.5:
+            reason = f"⚠️ Volume WEAK: ratio={volume_ratio:.2f}x"
+            logger.debug(reason)
+            return True, reason, 0.9
+        else:
+            reason = f"❌ Volume VERY WEAK: ratio={volume_ratio:.2f}x"
+            logger.debug(reason)
+            return False, reason, 0.8
+    
+    def check_price_action(self, signal_type: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """Price Action Confirmation with Wick Validation.
+        
+        Detects basic candlestick patterns from tick data:
+        - Long upper wick: potential bearish reversal
+        - Long lower wick: potential bullish reversal
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            
+        Returns:
+            Tuple of (is_valid, reason, pattern_info)
+            - is_valid: True if price action supports signal
+            - reason: Explanation string
+            - pattern_info: Dict with pattern details
+        """
+        pattern_info = {
+            'pattern': 'none',
+            'upper_wick_ratio': 0.0,
+            'lower_wick_ratio': 0.0,
+            'body_size': 0.0,
+            'warning': None
+        }
+        
+        if len(self.tick_history) < 10 or len(self.high_history) < 10 or len(self.low_history) < 10:
+            return True, "Insufficient data for price action analysis", pattern_info
+        
+        recent_ticks = 5
+        open_price = safe_float(self.tick_history[-recent_ticks])
+        close_price = safe_float(self.tick_history[-1])
+        high_price = max(safe_float(h) for h in self.high_history[-recent_ticks:])
+        low_price = min(safe_float(l) for l in self.low_history[-recent_ticks:])
+        
+        body_size = abs(close_price - open_price)
+        total_range = high_price - low_price
+        
+        if total_range <= 0:
+            return True, "No price range detected", pattern_info
+        
+        pattern_info['body_size'] = body_size
+        
+        if close_price >= open_price:
+            upper_wick = high_price - close_price
+            lower_wick = open_price - low_price
+        else:
+            upper_wick = high_price - open_price
+            lower_wick = close_price - low_price
+        
+        upper_wick_ratio = safe_divide(upper_wick, total_range, 0.0)
+        lower_wick_ratio = safe_divide(lower_wick, total_range, 0.0)
+        
+        pattern_info['upper_wick_ratio'] = round(upper_wick_ratio, 3)
+        pattern_info['lower_wick_ratio'] = round(lower_wick_ratio, 3)
+        
+        long_wick_threshold = 0.4
+        has_long_upper_wick = upper_wick_ratio > long_wick_threshold
+        has_long_lower_wick = lower_wick_ratio > long_wick_threshold
+        
+        if has_long_upper_wick and has_long_lower_wick:
+            pattern_info['pattern'] = 'doji'
+        elif has_long_upper_wick:
+            pattern_info['pattern'] = 'long_upper_wick'
+        elif has_long_lower_wick:
+            pattern_info['pattern'] = 'long_lower_wick'
+        else:
+            pattern_info['pattern'] = 'normal'
+        
+        if signal_type == "BUY":
+            if has_long_upper_wick and not has_long_lower_wick:
+                pattern_info['warning'] = 'Long upper wick detected - potential reversal'
+                reason = f"⚠️ BUY warning: {pattern_info['pattern']} (upper_wick={upper_wick_ratio:.1%})"
+                logger.debug(reason)
+                return False, reason, pattern_info
+            elif has_long_lower_wick:
+                reason = f"✅ BUY supported: long lower wick suggests buying pressure"
+                pattern_info['pattern'] = 'hammer'
+                return True, reason, pattern_info
+            else:
+                return True, f"✅ Price action neutral for BUY", pattern_info
+                
+        elif signal_type == "SELL":
+            if has_long_lower_wick and not has_long_upper_wick:
+                pattern_info['warning'] = 'Long lower wick detected - potential reversal'
+                reason = f"⚠️ SELL warning: {pattern_info['pattern']} (lower_wick={lower_wick_ratio:.1%})"
+                logger.debug(reason)
+                return False, reason, pattern_info
+            elif has_long_upper_wick:
+                reason = f"✅ SELL supported: long upper wick suggests selling pressure"
+                pattern_info['pattern'] = 'shooting_star'
+                return True, reason, pattern_info
+            else:
+                return True, f"✅ Price action neutral for SELL", pattern_info
+        
+        return True, "Price action check passed", pattern_info
+    
+    def should_generate_signal(self, signal_type: str) -> Tuple[bool, str]:
+        """Signal Cooldown System to prevent overtrading.
+        
+        Checks if enough time has passed since the last signal of the same type.
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            
+        Returns:
+            Tuple of (can_generate, reason)
+            - can_generate: True if cooldown has passed
+            - reason: Explanation string
+        """
+        current_time = datetime.now()
+        
+        if signal_type == "BUY":
+            last_time = self.last_buy_time
+            direction = "BUY"
+        elif signal_type == "SELL":
+            last_time = self.last_sell_time
+            direction = "SELL"
+        else:
+            return True, "Invalid signal type"
+        
+        if last_time is None:
+            return True, f"No previous {direction} signal - ready"
+        
+        time_diff = (current_time - last_time).total_seconds()
+        
+        if time_diff < self.COOLDOWN_SECONDS:
+            remaining = self.COOLDOWN_SECONDS - time_diff
+            reason = f"⏳ Cooldown active for {direction}: {remaining:.1f}s remaining (last signal {time_diff:.1f}s ago)"
+            logger.debug(reason)
+            return False, reason
+        
+        return True, f"✅ Cooldown passed for {direction}: {time_diff:.1f}s since last signal"
+    
+    def update_signal_time(self, signal_type: str) -> None:
+        """Update the last signal time after a signal is generated.
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+        """
+        current_time = datetime.now()
+        self.last_signal_time = current_time
+        
+        if signal_type == "BUY":
+            self.last_buy_time = current_time
+        elif signal_type == "SELL":
+            self.last_sell_time = current_time
+    
+    def get_confluence_score(self, signal_type: str, 
+                              indicators: IndicatorValues,
+                              m5_indicators: Optional[Dict[str, float]] = None
+                              ) -> Tuple[float, str, Dict[str, Any]]:
+        """Confluence Scoring combining all filter results.
+        
+        Aggregates scores from:
+        - ADX filter (0-20 points)
+        - EMA slope (0-15 points)
+        - Volume filter (0-15 points)
+        - Price action (0-15 points)
+        - MTF confirmation (0-20 points)
+        - RSI momentum (0-15 points)
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            indicators: Current IndicatorValues
+            m5_indicators: Optional M5 timeframe indicators
+            
+        Returns:
+            Tuple of (total_score, confidence_level, details)
+            - total_score: 0-100 score
+            - confidence_level: "STRONG" (>=70), "MEDIUM" (>=50), "WEAK" (<50)
+            - details: Dict with individual filter scores
+        """
+        details = {
+            'adx_score': 0,
+            'ema_slope_score': 0,
+            'volume_score': 0,
+            'price_action_score': 0,
+            'mtf_score': 0,
+            'rsi_momentum_score': 0,
+            'filters_passed': [],
+            'filters_failed': [],
+            'warnings': []
+        }
+        
+        total_score = 0.0
+        
+        adx_valid, adx_reason, adx_multiplier = self.check_adx_filter(
+            indicators.adx, indicators.plus_di, indicators.minus_di, signal_type
+        )
+        if adx_valid:
+            if adx_multiplier >= 1.0:
+                details['adx_score'] = 20
+            elif adx_multiplier >= 0.85:
+                details['adx_score'] = 15
+            else:
+                details['adx_score'] = 10
+            details['filters_passed'].append('ADX')
+        else:
+            details['adx_score'] = 0
+            details['filters_failed'].append('ADX')
+        total_score += details['adx_score']
+        
+        slope_valid, slope_reason, slope_data = self.check_ema_slope(signal_type)
+        if slope_valid:
+            if slope_data.get('strength') == 'strong':
+                details['ema_slope_score'] = 15
+            elif slope_data.get('strength') == 'moderate':
+                details['ema_slope_score'] = 12
+            else:
+                details['ema_slope_score'] = 8
+            details['filters_passed'].append('EMA_SLOPE')
+        else:
+            details['ema_slope_score'] = 0
+            details['filters_failed'].append('EMA_SLOPE')
+            details['warnings'].append(slope_reason)
+        total_score += details['ema_slope_score']
+        
+        vol_valid, vol_reason, vol_multiplier = self.check_volume_filter()
+        if vol_valid:
+            if vol_multiplier >= 1.15:
+                details['volume_score'] = 15
+            elif vol_multiplier >= 1.0:
+                details['volume_score'] = 12
+            else:
+                details['volume_score'] = 8
+            details['filters_passed'].append('VOLUME')
+        else:
+            details['volume_score'] = 5
+            details['warnings'].append(vol_reason)
+        total_score += details['volume_score']
+        
+        pa_valid, pa_reason, pa_info = self.check_price_action(signal_type)
+        if pa_valid:
+            if pa_info.get('pattern') in ['hammer', 'shooting_star']:
+                details['price_action_score'] = 15
+            else:
+                details['price_action_score'] = 10
+            details['filters_passed'].append('PRICE_ACTION')
+        else:
+            details['price_action_score'] = 0
+            details['filters_failed'].append('PRICE_ACTION')
+            details['warnings'].append(pa_reason)
+        total_score += details['price_action_score']
+        
+        mtf_aligned, mtf_reason, mtf_multiplier = self.check_mtf_trend_confirmation(
+            signal_type, m5_indicators
+        )
+        if mtf_aligned:
+            if mtf_multiplier >= 1.1:
+                details['mtf_score'] = 20
+            else:
+                details['mtf_score'] = 15
+            details['filters_passed'].append('MTF')
+        else:
+            details['mtf_score'] = 5
+            details['filters_failed'].append('MTF')
+            details['warnings'].append(mtf_reason)
+        total_score += details['mtf_score']
+        
+        rsi_momentum, momentum_bonus = self.check_rsi_momentum(indicators.rsi, signal_type)
+        if momentum_bonus > 0:
+            details['rsi_momentum_score'] = int(momentum_bonus * 150)
+            details['filters_passed'].append('RSI_MOMENTUM')
+        else:
+            details['rsi_momentum_score'] = 5
+        total_score += details['rsi_momentum_score']
+        
+        total_score = min(total_score, 100)
+        
+        if total_score >= 70:
+            confidence_level = "STRONG"
+        elif total_score >= 50:
+            confidence_level = "MEDIUM"
+        else:
+            confidence_level = "WEAK"
+        
+        logger.info(
+            f"📊 Confluence Score for {signal_type}: {total_score:.0f}/100 ({confidence_level}) | "
+            f"Passed: {details['filters_passed']} | Failed: {details['filters_failed']}"
+        )
+        
+        return total_score, confidence_level, details
         
     def calculate_all_indicators(self) -> IndicatorValues:
         """
@@ -943,6 +1468,14 @@ class TradingStrategy:
         adx_tp_multiplier = 1.0
         
         if buy_score >= self.MIN_CONFIDENCE_THRESHOLD and buy_score > sell_score:
+            cooldown_ok, cooldown_reason = self.should_generate_signal("BUY")
+            if not cooldown_ok:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = cooldown_reason
+                logger.debug(f"⏳ BUY blocked by cooldown: {cooldown_reason}")
+                return result
+            
             adx_valid, adx_reason, adx_tp_multiplier = self.check_adx_filter(
                 indicators.adx, indicators.plus_di, indicators.minus_di, "BUY"
             )
@@ -952,19 +1485,50 @@ class TradingStrategy:
             elif adx_valid:
                 buy_reasons.append(adx_reason)
             
+            confluence_score, confidence_level, confluence_details = self.get_confluence_score(
+                "BUY", indicators
+            )
+            
+            if confluence_score < self.MIN_CONFLUENCE_SCORE and confidence_level == "WEAK":
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"Confluence too weak ({confluence_score:.0f}/100) | Failed: {confluence_details.get('filters_failed', [])}"
+                logger.debug(f"⏳ BUY blocked by weak confluence: {confluence_score:.0f}/100")
+                return result
+            
+            confluence_multiplier = 1.0
+            if confidence_level == "STRONG":
+                confluence_multiplier = 1.15
+            elif confidence_level == "MEDIUM":
+                confluence_multiplier = 1.0
+            else:
+                confluence_multiplier = 0.85
+            
             if adx_valid or indicators.adx == 0:
+                self.update_signal_time("BUY")
+                
                 result.signal = Signal.BUY
-                final_confidence = min(buy_score * vol_multiplier * adx_tp_multiplier, 1.0)
+                final_confidence = min(buy_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier, 1.0)
                 result.confidence = final_confidence
                 result.reason = " | ".join(buy_reasons)
+                
+                result.reason += f" | Confluence: {confluence_score:.0f}/100 ({confidence_level})"
                 
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
+                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
                 return result
                 
         if sell_score >= self.MIN_CONFIDENCE_THRESHOLD and sell_score > buy_score:
+            cooldown_ok, cooldown_reason = self.should_generate_signal("SELL")
+            if not cooldown_ok:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = cooldown_reason
+                logger.debug(f"⏳ SELL blocked by cooldown: {cooldown_reason}")
+                return result
+            
             adx_valid, adx_reason, adx_tp_multiplier = self.check_adx_filter(
                 indicators.adx, indicators.plus_di, indicators.minus_di, "SELL"
             )
@@ -974,16 +1538,39 @@ class TradingStrategy:
             elif adx_valid:
                 sell_reasons.append(adx_reason)
             
+            confluence_score, confidence_level, confluence_details = self.get_confluence_score(
+                "SELL", indicators
+            )
+            
+            if confluence_score < self.MIN_CONFLUENCE_SCORE and confidence_level == "WEAK":
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"Confluence too weak ({confluence_score:.0f}/100) | Failed: {confluence_details.get('filters_failed', [])}"
+                logger.debug(f"⏳ SELL blocked by weak confluence: {confluence_score:.0f}/100")
+                return result
+            
+            confluence_multiplier = 1.0
+            if confidence_level == "STRONG":
+                confluence_multiplier = 1.15
+            elif confidence_level == "MEDIUM":
+                confluence_multiplier = 1.0
+            else:
+                confluence_multiplier = 0.85
+            
             if adx_valid or indicators.adx == 0:
+                self.update_signal_time("SELL")
+                
                 result.signal = Signal.SELL
-                final_confidence = min(sell_score * vol_multiplier * adx_tp_multiplier, 1.0)
+                final_confidence = min(sell_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier, 1.0)
                 result.confidence = final_confidence
                 result.reason = " | ".join(sell_reasons)
+                
+                result.reason += f" | Confluence: {confluence_score:.0f}/100 ({confidence_level})"
                 
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
+                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
                 return result
                 
         result.signal = Signal.WAIT
