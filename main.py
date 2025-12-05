@@ -898,7 +898,7 @@ def shutdown_handler(signum, frame):
     if trading_manager:
         from trading import TradingState
         
-        if trading_manager.state in [TradingState.TRADING, TradingState.WAITING]:
+        if trading_manager.state in [TradingState.RUNNING, TradingState.WAITING_RESULT]:
             logger.info("⏳ Waiting for active trade to complete (max 5 minutes)...")
             
             max_wait = 300
@@ -906,7 +906,7 @@ def shutdown_handler(signum, frame):
             elapsed = 0
             
             while elapsed < max_wait:
-                if trading_manager.state not in [TradingState.TRADING, TradingState.WAITING]:
+                if trading_manager.state not in [TradingState.RUNNING, TradingState.WAITING_RESULT]:
                     logger.info("✅ Active trade completed")
                     break
                 time.sleep(wait_interval)

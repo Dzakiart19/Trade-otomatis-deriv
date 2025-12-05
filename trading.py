@@ -1318,6 +1318,37 @@ class TradingManager:
         
         return projected_loss + max(0, current_loss)
     
+    def _calculate_max_safe_stake(self, balance: float) -> float:
+        """
+        Hitung stake maksimum yang aman untuk martingale N level.
+        
+        Args:
+            balance: Current balance
+            
+        Returns:
+            Maximum safe stake yang tidak melebihi risk limit
+        """
+        max_exposure = balance * self.MAX_TOTAL_RISK_PERCENT
+        multiplier = self._get_adaptive_martingale_multiplier()
+        n = self.MARTINGALE_LOOK_AHEAD_LEVELS
+        
+        # Sum of geometric series: a + a*r + a*r^2 + ... + a*r^(n-1)
+        # = a * (1 - r^n) / (1 - r) where a = stake, r = multiplier
+        if multiplier == 1:
+            series_multiplier = n
+        else:
+            series_multiplier = (1 - multiplier**n) / (1 - multiplier)
+        
+        # max_exposure = stake * series_multiplier
+        # stake = max_exposure / series_multiplier
+        max_stake = max_exposure / series_multiplier
+        
+        # Pastikan tidak kurang dari minimum stake
+        symbol_config = get_symbol_config(self.symbol)
+        min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+        
+        return round(max(min_stake, max_stake), 2)
+    
     def _perform_preflight_risk_check(self, current_balance: float) -> tuple[bool, str]:
         """
         Perform pre-flight risk validation sebelum execute trade.
@@ -1347,15 +1378,49 @@ class TradingManager:
         total_exposure = self._calculate_total_exposure()
         exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
         
-        # Check 3: Auto-stop jika total risk > 30% balance
+        # Check 3: Auto-adjust stake jika total risk > 30% balance
         max_risk = current_balance * self.MAX_TOTAL_RISK_PERCENT
         if total_exposure > max_risk:
-            msg = (
-                f"Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
-                f"melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}% (${max_risk:.2f})"
-            )
-            logger.error(f"🛑 Risk limit exceeded: {msg}")
-            return False, msg
+            # Coba auto-adjust stake ke nilai yang aman
+            safe_stake = self._calculate_max_safe_stake(current_balance)
+            symbol_config = get_symbol_config(self.symbol)
+            min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+            
+            if safe_stake >= min_stake:
+                old_stake = self.current_stake
+                self.current_stake = safe_stake
+                self.base_stake = safe_stake
+                
+                logger.info(f"⚠️ Auto-adjust stake: ${old_stake:.2f} -> ${safe_stake:.2f} untuk memenuhi risk limit")
+                
+                # Recalculate exposure dengan stake baru
+                total_exposure = self._calculate_total_exposure()
+                exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
+                
+                if total_exposure <= max_risk:
+                    msg = f"Stake auto-adjusted ke ${safe_stake:.2f} (exposure: {exposure_percent:.1f}%)"
+                    logger.info(f"✅ {msg}")
+                    if self.on_error:
+                        self.on_error(f"⚠️ Stake disesuaikan dari ${old_stake:.2f} ke ${safe_stake:.2f} agar aman")
+                    # Lanjutkan trading dengan stake yang sudah disesuaikan
+                else:
+                    # Masih melebihi setelah adjustment, stop trading
+                    msg = (
+                        f"Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
+                        f"masih melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}% (${max_risk:.2f}) "
+                        f"setelah stake adjustment ke ${safe_stake:.2f}"
+                    )
+                    logger.error(f"🛑 Risk limit exceeded: {msg}")
+                    return False, msg
+            else:
+                # Stake minimum masih melebihi limit
+                msg = (
+                    f"Balance ${current_balance:.2f} terlalu rendah. "
+                    f"Minimum stake ${min_stake:.2f} menghasilkan exposure {exposure_percent:.1f}% "
+                    f"melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}%"
+                )
+                logger.error(f"🛑 Risk limit exceeded: {msg}")
+                return False, msg
         
         # Check 4: Warning jika mendekati risk limit
         warning_threshold = current_balance * self.RISK_WARNING_PERCENT
@@ -1507,13 +1572,29 @@ class TradingManager:
         is_valid, error_msg = validate_duration_for_symbol(symbol, duration, duration_unit)
         if not is_valid:
             return f"❌ Error: {error_msg}"
+        
+        # Simpan symbol dulu untuk digunakan di _calculate_max_safe_stake
+        self.symbol = symbol
+            
+        # Validasi stake vs balance - pre-check untuk menghindari error saat start
+        stake_warning = ""
+        if self.ws and self.ws.is_ready():
+            current_balance = self.ws.get_balance()
+            if current_balance > 0:
+                max_safe_stake = self._calculate_max_safe_stake(current_balance)
+                if stake > max_safe_stake:
+                    stake_warning = (
+                        f"\n\n⚠️ **PERINGATAN RISK:**\n"
+                        f"Stake ${stake:.2f} mungkin terlalu tinggi untuk balance ${current_balance:.2f}.\n"
+                        f"Stake akan otomatis disesuaikan ke ${max_safe_stake:.2f} saat trading untuk memenuhi risk limit 30%."
+                    )
+                    logger.warning(f"⚠️ Stake ${stake:.2f} > max safe ${max_safe_stake:.2f} untuk balance ${current_balance:.2f}")
             
         self.base_stake = stake
         self.current_stake = stake
         self.duration = duration
         self.duration_unit = duration_unit
         self.target_trades = target_trades
-        self.symbol = symbol
         
         target_text = f"{target_trades} trades" if target_trades > 0 else "Unlimited"
         
@@ -1521,7 +1602,7 @@ class TradingManager:
                 f"• Stake: ${stake}\n"
                 f"• Durasi: {duration}{duration_unit}\n"
                 f"• Target: {target_text}\n"
-                f"• Symbol: {symbol}")
+                f"• Symbol: {symbol}{stake_warning}")
                 
     def start(self) -> str:
         """
@@ -1598,12 +1679,20 @@ class TradingManager:
         
         target_text = f"{self.target_trades}" if self.target_trades > 0 else "∞"
         
+        # Pre-check stake vs balance dan info auto-adjust jika perlu
+        stake_info = ""
+        current_balance = self.stats.starting_balance
+        max_safe_stake = self._calculate_max_safe_stake(current_balance)
+        if self.base_stake > max_safe_stake:
+            stake_info = f"\n\n⚠️ Stake akan auto-adjust ke ${max_safe_stake:.2f} saat trade"
+            logger.info(f"Pre-check: Stake ${self.base_stake:.2f} akan di-adjust ke ${max_safe_stake:.2f}")
+        
         return (f"🚀 **AUTO TRADING STARTED**\n\n"
                 f"• Symbol: {self.symbol}\n"
                 f"• Stake: ${self.base_stake}\n"
                 f"• Durasi: {self.duration}{self.duration_unit}\n"
                 f"• Target: {target_text} trades\n"
-                f"• Saldo Awal: ${self.stats.starting_balance:.2f}\n\n"
+                f"• Saldo Awal: ${self.stats.starting_balance:.2f}{stake_info}\n\n"
                 f"⏳ Mengumpulkan data tick untuk analisis RSI...")
                 
     def stop(self) -> str:
