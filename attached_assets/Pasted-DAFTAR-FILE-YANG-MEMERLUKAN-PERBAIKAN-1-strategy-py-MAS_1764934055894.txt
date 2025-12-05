@@ -1,0 +1,83 @@
+DAFTAR FILE YANG MEMERLUKAN PERBAIKAN:
+
+1. strategy.py
+   MASALAH:
+   - Terlalu banyak false signals (confluence scoring terlalu permisif)
+   - ADX directional conflict tidak ditangani dengan baik (masih execute trade meski +DI/-DI berlawanan)
+   - Volume filter terlalu lemah (menggunakan estimasi dari price movement)
+   - Cooldown system tidak efektif (masih banyak overtrading terlihat di log)
+   - Price action validation kurang ketat
+   - RSI entry range terlalu lebar (20-35 untuk BUY, 65-80 untuk SELL)
+
+2. trading.py
+   MASALAH:
+   - Risk management pre-flight check terlalu permisif (masih allow stake $1 padahal balance $13)
+   - Session recovery tidak ter-restore dengan baik saat bot restart
+   - Martingale calculation tidak memperhitungkan volatility zone dengan benar
+   - Progress notification spam (setiap tick dikirim, seharusnya hanya milestone)
+   - Max safe stake calculation salah (harusnya lebih konservatif)
+   - Circuit breaker tidak triggered meski banyak conflicting signals
+
+3. main.py
+   MASALAH:
+   - Progress callback tidak ter-register dengan benar (log menunjukkan callback dipanggil tapi tidak ada deduplikasi)
+   - Chat ID confirmation tidak reliable (saved tapi tidak di-validate ulang)
+   - Error handling untuk Telegram API 400 (parse entities) tidak ada retry dengan plain text
+   - Shutdown handler tidak menunggu trade aktif selesai dengan proper timeout
+
+4. deriv_ws.py
+   MASALAH:
+   - Health check ping/pong terlalu agresif (30s interval terlalu cepat)
+   - Authorization retry mechanism tidak handle "InvalidToken" dengan fallback ke demo
+   - Connection state validation tidak cukup sebelum buy request
+   - WebSocket reconnect tidak clear pending subscriptions dengan benar
+
+PRIORITAS PERBAIKAN (dari CRITICAL ke MEDIUM):
+
+CRITICAL (Perbaiki Segera):
+1. strategy.py - Line 800-900 (confluence_score calculation)
+   - MIN_CONFLUENCE_SCORE harus dinaikkan dari 50 ke 65
+   - ADX directional conflict threshold harus lebih ketat (+5 jadi +10)
+   - Filter kombinasi: ADX + Volume + Price Action semua harus pass
+
+2. trading.py - Line 350-450 (_perform_preflight_risk_check)
+   - MAX_TOTAL_RISK_PERCENT turunkan dari 0.30 ke 0.20
+   - Projected martingale look-ahead naikkan dari 3 ke 5 levels
+   - Safe stake calculation harus cap di 0.25x balance (bukan 0.30x)
+
+3. trading.py - Line 600-700 (progress notification)
+   - Hapus notification untuk setiap tick
+   - Hanya kirim di milestone: 0%, 50%, 100%
+   - Tambahkan debounce minimum 30 detik (bukan 10 detik)
+
+HIGH (Perbaiki Setelah Critical):
+4. strategy.py - Line 1200-1300 (check_adx_filter)
+   - Directional conflict di +5 harus auto-reject (bukan warning)
+   - ADX < 20 harus hard block (bukan soft warning)
+
+5. main.py - Line 450-550 (send_telegram_message_sync)
+   - Tambahkan deduplikasi message content (hash check)
+   - Retry dengan exponential backoff 1s, 2s, 4s, 8s
+   - Fallback ke plain text after 1st failure (bukan 2nd)
+
+MEDIUM (Optimization):
+6. deriv_ws.py - Line 100-200 (health check settings)
+   - HEALTH_CHECK_INTERVAL naikkan ke 60s (dari 30s)
+   - PING_TIMEOUT naikkan ke 120s (dari 90s)
+   - Tambahkan jitter 10-20s untuk avoid collision
+
+7. trading.py - Line 800-900 (session recovery)
+   - Validate recovery file age < 30 menit (bukan 1 jam)
+   - Restore martingale level dengan validation
+   - Clear recovery file jika data corrupt
+
+REKOMENDASI PERBAIKAN TAMBAHAN:
+- symbols.py: Tambahkan min_stake validation per symbol (hardcode di config)
+- keep_alive.py: Tambahkan /metrics endpoint untuk monitoring real-time
+- test_real_trade.py: Incomplete file (ada truncation di line 200-300)
+
+CATATAN PENTING:
+- Jangan edit semua file sekaligus, perbaiki satu-satu dengan testing
+- Mulai dari CRITICAL priority terlebih dahulu
+- Setelah edit, test dengan /autotrade 0.50 5t 3 R_100
+- Monitor console output untuk verify perbaikan berhasil
