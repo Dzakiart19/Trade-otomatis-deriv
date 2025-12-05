@@ -66,7 +66,8 @@ class DerivWebSocket:
     
     # Health check settings
     HEALTH_CHECK_INTERVAL = 30  # detik
-    PING_TIMEOUT = 10  # detik
+    PING_TIMEOUT = 60  # detik - lebih toleran untuk network latency
+    MAX_MISSED_PONGS = 2  # jumlah pong yang boleh terlewat sebelum reconnect
     
     def __init__(self, demo_token: str, real_token: str):
         """
@@ -128,6 +129,7 @@ class DerivWebSocket:
         # Last ping/pong tracking
         self._last_pong_time = time.time()
         self._awaiting_pong = False
+        self._missed_pong_count = 0
         
     def _validate_tokens(self):
         """Validasi format token API"""
@@ -235,11 +237,12 @@ class DerivWebSocket:
                 self._handle_buy_response(data)
             elif msg_type == "proposal_open_contract":
                 self._handle_contract_update(data)
-            elif msg_type == "pong":
-                self._handle_pong(data)
             elif msg_type == "ping":
-                # Respond to ping with pong
-                self._send({"pong": 1})
+                # Deriv API responds to our ping with: {"msg_type": "ping", "ping": "pong"}
+                # This is the pong response to our ping request
+                if data.get("ping") == "pong":
+                    self._handle_pong(data)
+                    logger.debug("Received pong response from Deriv")
             elif "error" in data:
                 self._handle_error(data)
                 
@@ -333,6 +336,7 @@ class DerivWebSocket:
         """Handle pong response untuk health check"""
         self._last_pong_time = time.time()
         self._awaiting_pong = False
+        self._missed_pong_count = 0  # Reset missed count on successful pong
         logger.debug("Received pong - connection healthy")
         
     def _handle_balance(self, data: dict):
@@ -481,6 +485,7 @@ class DerivWebSocket:
     def _start_health_check(self):
         """Start health check thread untuk monitoring koneksi"""
         self._stop_health_check = False
+        self._missed_pong_count = 0
         
         def health_check_loop():
             while not self._stop_health_check and self.is_connected:
@@ -490,14 +495,18 @@ class DerivWebSocket:
                     if not self.is_connected:
                         break
                         
-                    # Check if we got pong recently
-                    time_since_pong = time.time() - self._last_pong_time
-                    if self._awaiting_pong and time_since_pong > self.PING_TIMEOUT:
-                        logger.warning(f"⚠️ No pong received for {time_since_pong:.1f}s - connection may be dead")
-                        # Force reconnect
-                        self._force_reconnect()
-                        break
+                    # Check if previous ping was answered
+                    if self._awaiting_pong:
+                        self._missed_pong_count += 1
+                        logger.warning(f"⚠️ Missed pong #{self._missed_pong_count} (max: {self.MAX_MISSED_PONGS})")
                         
+                        # Only force reconnect after multiple missed pongs
+                        if self._missed_pong_count >= self.MAX_MISSED_PONGS:
+                            time_since_pong = time.time() - self._last_pong_time
+                            logger.error(f"❌ Connection appears dead - no pong for {time_since_pong:.1f}s")
+                            self._force_reconnect()
+                            break
+                    
                     # Send ping
                     self._awaiting_pong = True
                     self._send({"ping": 1})
