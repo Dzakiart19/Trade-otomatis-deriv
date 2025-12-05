@@ -142,17 +142,17 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     args = context.args if context.args else []
     
-    stake = 0.35
-    duration_str = "5t"
+    stake = 0.50
+    duration_str = "5t"  # 5 ticks untuk Volatility Index
     target_trades = 5
     
     if len(args) >= 1:
         try:
             stake = float(args[0])
-            if stake < 0.35:
-                stake = 0.35
+            if stake < 0.50:
+                stake = 0.50
                 await update.message.reply_text(
-                    "⚠️ Stake minimum adalah $0.35. Dikoreksi otomatis."
+                    "⚠️ Stake minimum adalah $0.50. Dikoreksi otomatis."
                 )
         except ValueError:
             await update.message.reply_text("❌ Format stake tidak valid. Gunakan angka.")

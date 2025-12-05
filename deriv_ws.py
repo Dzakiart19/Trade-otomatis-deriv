@@ -351,6 +351,24 @@ class DerivWebSocket:
             
         return False
         
+    def get_contracts_for(self, symbol: str = "frxXAUUSD") -> bool:
+        """
+        Query kontrak yang tersedia untuk symbol.
+        Gunakan untuk mendapatkan durasi dan tipe kontrak yang valid.
+        
+        Args:
+            symbol: Symbol untuk query
+            
+        Returns:
+            True jika request terkirim
+        """
+        payload = {
+            "contracts_for": symbol,
+            "currency": "USD",
+            "product_type": "basic"
+        }
+        return self._send(payload)
+        
     def subscribe_ticks(self, symbol: str = "frxXAUUSD") -> bool:
         """
         Subscribe ke tick stream untuk symbol tertentu.

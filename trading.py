@@ -83,8 +83,8 @@ class TradingManager:
     """
     
     # Konstanta trading
-    MIN_STAKE = 0.35  # Stake minimum Deriv
-    DEFAULT_STAKE = 0.35
+    MIN_STAKE = 0.50  # Stake minimum Deriv untuk XAUUSD
+    DEFAULT_STAKE = 0.50
     MARTINGALE_MULTIPLIER = 2.1
     
     def __init__(self, deriv_ws: DerivWebSocket):
@@ -101,9 +101,9 @@ class TradingManager:
         self.base_stake = self.DEFAULT_STAKE
         self.current_stake = self.DEFAULT_STAKE
         self.duration = 5
-        self.duration_unit = "t"  # ticks
+        self.duration_unit = "t"  # ticks (5 tick untuk Volatility Index)
         self.target_trades = 0  # 0 = unlimited
-        self.symbol = "frxXAUUSD"
+        self.symbol = "R_100"  # Volatility 100 Index - mendukung short-term trading
         
         # State management
         self.state = TradingState.IDLE
@@ -155,7 +155,11 @@ class TradingManager:
             
             if self.on_error:
                 self.on_error(f"Gagal open posisi: {error_msg}")
-                
+            
+            # Cooldown sebelum retry untuk hindari spam
+            import time
+            time.sleep(5)
+            
             # Reset state untuk coba lagi
             self.state = TradingState.RUNNING
             return

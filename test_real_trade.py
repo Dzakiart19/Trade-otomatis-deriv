@@ -125,8 +125,9 @@ class RealTradeTest:
             logger.error("❌ Tidak bisa mendapatkan info akun!")
             return False
             
-    def setup_trader(self, stake: float = 0.35, duration: int = 5,
-                     duration_unit: str = "t", target_trades: int = 3):
+    def setup_trader(self, stake: float = 0.50, duration: int = 5,
+                     duration_unit: str = "t", target_trades: int = 3,
+                     symbol: str = "R_100"):
         """Setup TradingManager dengan callbacks yang benar"""
         if not self.deriv:
             logger.error("❌ Deriv belum terkoneksi!")
@@ -143,11 +144,13 @@ class RealTradeTest:
             stake=stake,
             duration=duration,
             duration_unit=duration_unit,
-            target_trades=target_trades
+            target_trades=target_trades,
+            symbol=symbol
         )
         
         logger.info("")
         logger.info("📋 PARAMETER TRADING:")
+        logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Stake: ${stake}")
         logger.info(f"   • Durasi: {duration}{duration_unit}")
         logger.info(f"   • Target: {target_trades} trades")
@@ -265,10 +268,11 @@ def main():
             return 1
             
         if not test.setup_trader(
-            stake=0.35,
+            stake=0.50,
             duration=5,
-            duration_unit="t",
-            target_trades=3
+            duration_unit="t",  # 5 ticks untuk Volatility Index
+            target_trades=3,
+            symbol="R_100"  # Volatility 100 Index
         ):
             return 1
             
