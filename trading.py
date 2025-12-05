@@ -349,11 +349,11 @@ class TradingManager:
             
     def configure(
         self,
-        stake: float = 0.35,
+        stake: float = 0.50,
         duration: int = 5,
         duration_unit: str = "t",
         target_trades: int = 0,
-        symbol: str = "frxXAUUSD"
+        symbol: str = "R_100"
     ) -> str:
         """
         Konfigurasi parameter trading.
@@ -370,6 +370,7 @@ class TradingManager:
         """
         # Validasi stake
         if stake < self.MIN_STAKE:
+            logger.warning(f"⚠️ Stake ${stake} dibawah minimum. Disesuaikan ke ${self.MIN_STAKE}")
             stake = self.MIN_STAKE
             
         self.base_stake = stake
@@ -400,6 +401,11 @@ class TradingManager:
         if not self.ws.is_ready():
             return "❌ WebSocket belum terkoneksi. Coba lagi nanti."
             
+        # Double-check stake validation (防止 bypass)
+        if self.base_stake < self.MIN_STAKE:
+            logger.warning(f"⚠️ Base stake ${self.base_stake} dibawah minimum. Disesuaikan ke ${self.MIN_STAKE}")
+            self.base_stake = self.MIN_STAKE
+        
         # Reset stats untuk session baru
         self.stats = SessionStats()
         self.stats.starting_balance = self.ws.get_balance()

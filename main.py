@@ -58,7 +58,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_text = (
         "🤖 **DERIV AUTO TRADING BOT**\n\n"
-        "Bot trading otomatis untuk Binary Options (XAUUSD).\n"
+        "Bot trading otomatis untuk Binary Options (Volatility Index).\n"
         "Menggunakan strategi RSI + Martingale.\n\n"
         "📋 **Menu Utama:**\n"
         "• /akun - Kelola akun (saldo, switch demo/real)\n"
