@@ -248,7 +248,7 @@ class TradingManager:
     """
     
     MARTINGALE_MULTIPLIER = 2.1
-    MAX_MARTINGALE_LEVEL = 5
+    MAX_MARTINGALE_LEVEL = 3
     
     MAX_LOSS_PERCENT = 0.20
     MAX_CONSECUTIVE_LOSSES = 5
