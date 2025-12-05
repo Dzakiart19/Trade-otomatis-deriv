@@ -1,0 +1,91 @@
+PROMPT KOMPREHENSIF UNTUK PERBAIKAN BOT TRADING DERIV
+
+=== PRIORITAS CRITICAL (LAKUKAN DULU) ===
+
+1. PERBAIKI ERROR RECOVERY PADA BUY FAILURES
+Ketika buy/sell contract gagal berkali-kali, bot kadang stuck dalam state WAITING_RESULT. Perbaiki trading.py bagian _on_buy_response dan _execute_trade dengan:
+- Tambahkan timeout detection jika buy tidak mendapat response dalam 30 detik
+- Auto-reset state ke RUNNING jika timeout tercapai
+- Tambahkan circuit breaker jika 3 consecutive buy failures dalam 1 menit
+- Log detail error code dan message untuk troubleshooting
+Jangan ubah logic Martingale atau strategy, hanya error handling untuk buy process.
+
+2. PERBAIKI WEBSOCKET RECONNECTION LOGIC
+Reconnection kadang gagal karena auth timeout. Perbaiki deriv_ws.py bagian _attempt_reconnect dan _authorize_with_retry:
+- Tambahkan pre-check network connectivity sebelum reconnect
+- Increase AUTH_TIMEOUT dari 15 ke 30 detik
+- Clear semua pending subscriptions sebelum re-authorize
+- Tambahkan connection state validation
+Jangan ubah message routing atau tick handling, hanya reconnection flow.
+
+=== PRIORITAS IMPORTANT (JIKA ADA WAKTU) ===
+
+3. PERBAIKI HEALTH CHECK STABILITY
+Ada issue pada health check WebSocket yang terkadang menyebabkan false positive disconnect. Perbaiki deriv_ws.py bagian _start_health_check dengan:
+- Tambahkan jitter pada ping interval untuk menghindari collision
+- Tingkatkan PING_TIMEOUT dari 60 ke 90 detik
+- Tambahkan grace period sebelum force reconnect
+- Log lebih detail untuk debugging ping/pong cycle
+Jangan ubah bagian lain, hanya fokus pada health check mechanism.
+
+4. ENHANCED RISK MANAGEMENT VALIDATION
+Tambahkan pre-flight validation sebelum execute trade di trading.py method _execute_trade:
+- Check jika projected Martingale stake level 3 masih dalam balance
+- Hitung total exposure jika semua pending trades loss
+- Auto-stop jika total risk > 30% balance
+- Warning notification jika mendekati risk limit
+Jangan ubah Martingale multiplier atau signal generation, hanya tambahkan safety checks.
+
+=== PRIORITAS NICE TO HAVE ===
+
+5. TAMBAHKAN SESSION RECOVERY MECHANISM
+Jika bot crash atau restart, session data hilang. Tambahkan session persistence di trading.py dengan:
+- Auto-save session stats ke JSON file setiap 5 trades
+- Restore session data jika bot restart dalam 1 jam
+- Tambahkan flag untuk enable/disable session recovery
+- Log recovery status saat bot startup
+Jangan ubah trading logic, hanya tambahkan persistence layer yang optional.
+
+6. TAMBAHKAN GRACEFUL SHUTDOWN HANDLER
+Bot kadang leave open positions saat shutdown. Tambahkan graceful shutdown di main.py:
+- Catch SIGTERM dan SIGINT signals
+- Wait for active trade completion max 5 minutes
+- Save all session data before exit
+- Send notification "Bot shutting down gracefully"
+- Close WebSocket properly
+Jangan ubah trading loop, hanya tambahkan shutdown handler.
+
+=== PRIORITAS OPTIONAL ===
+
+7. OPTIMASI PROGRESS NOTIFICATION FREQUENCY
+Progress notification kadang terlalu spam. Optimasi main.py dan trading.py bagian on_progress callback dengan:
+- Kirim notification hanya pada 0%, 25%, 50%, 75%, 100% progress
+- Batasi maksimal 1 notifikasi per 10 detik
+- Tambahkan debouncing untuk mencegah duplicate messages
+- Keep logging tetap verbose untuk debugging
+Jangan ubah strategy analysis atau tick processing, hanya notification logic.
+
+8. PERBAIKI TELEGRAM MESSAGE FORMAT ISSUES
+Kadang Telegram message gagal karena special characters. Perbaiki main.py bagian send_telegram_message_sync dengan:
+- Auto-escape semua special characters untuk Markdown
+- Fallback ke plain text jika Markdown gagal 2x
+- Tambahkan retry dengan exponential backoff max 3x
+- Log failed messages ke file untuk debugging
+Jangan ubah message content atau callback logic, hanya message delivery mechanism.
+
+9. TAMBAHKAN TRADE JOURNAL CSV VALIDATION
+CSV trade journal kadang corrupt jika write interrupted. Perbaiki trading.py method _log_trade_to_journal dengan:
+- Validate CSV file integrity sebelum append
+- Backup file sebelum write jika >100 records
+- Use atomic write dengan temp file + rename
+- Auto-repair header jika missing
+Jangan ubah trade logging content, hanya improve file safety.
+
+10. OPTIMASI STRATEGY TICK BUFFER
+Strategy tick history bisa jadi terlalu besar untuk long sessions. Optimasi strategy.py dengan:
+- Implement sliding window max 200 ticks (dari 100)
+- Clear old indicators jika tick_count > 500
+- Periodic memory cleanup tiap 100 ticks
+- Log memory usage untuk monitoring
+Jangan ubah indicator calculation atau signal logic, hanya memory management.
+
