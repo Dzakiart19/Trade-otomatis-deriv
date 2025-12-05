@@ -196,6 +196,44 @@ python test_real_trade.py
    - Update dikirim setiap 5 tick selama fase pengumpulan data
    - Tidak spam - berhenti setelah RSI siap dikalkulasi
 
+9. **Anti Double-Buy Mechanism** (2025-12-05)
+   - Flag `is_processing_signal` mencegah eksekusi ganda
+   - Cooldown 2 detik minimum antar trade
+   - Timeout 120 detik untuk signal processing stuck
+   - Auto-recovery jika bot stuck di state WAITING_RESULT
+
+10. **Comprehensive Risk Management** (2025-12-05)
+    - Max Session Loss: 20% dari balance awal
+    - Max Consecutive Losses: 5x loss berturut
+    - Daily Loss Limit: $50 USD per hari
+    - Balance Check sebelum Martingale
+    - Auto-stop dan session complete callback saat limit tercapai
+
+11. **Error Handling & Retry Logic** (2025-12-05)
+    - Max 3x retry untuk buy failures
+    - Random delay 5-10 detik antar retry
+    - Error logging ke file (logs/errors_YYYY-MM-DD.log)
+    - User notification untuk error kritis
+
+12. **Enhanced Logging System** (2025-12-05)
+    - Trade Journal: CSV file dengan detail setiap trade
+    - Session Summary: JSON file dengan statistik lengkap
+    - Error Log: File terpisah untuk debugging
+    - Log files di folder `logs/`
+
+## Risk Management Constants
+
+| Konstanta | Nilai | Deskripsi |
+|-----------|-------|-----------|
+| MAX_LOSS_PERCENT | 0.20 | Stop jika loss 20% dari balance awal |
+| MAX_CONSECUTIVE_LOSSES | 5 | Stop setelah 5x loss berturut |
+| MAX_DAILY_LOSS | 50.0 | Max loss $50/hari |
+| TRADE_COOLDOWN | 2.0 | Min 2 detik antar trade |
+| SIGNAL_TIMEOUT | 120.0 | Timeout 120 detik untuk processing |
+| MAX_BUY_RETRY | 3 | Max 3x retry untuk buy |
+| RETRY_DELAY_MIN | 5.0 | Min delay 5 detik saat retry |
+| RETRY_DELAY_MAX | 10.0 | Max delay 10 detik saat retry |
+
 ## Disclaimer
 
 Trading memiliki risiko tinggi. Bot ini untuk tujuan edukasi. Gunakan akun demo untuk testing sebelum menggunakan uang asli.
