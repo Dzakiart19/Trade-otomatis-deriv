@@ -72,7 +72,7 @@ active_chat_id: Optional[int] = None
 chat_id_confirmed: bool = False
 shutdown_requested: bool = False
 last_progress_notification_time: float = 0.0
-MIN_NOTIFICATION_INTERVAL: float = 10.0
+MIN_NOTIFICATION_INTERVAL: float = 2.0
 current_connected_user_id: Optional[int] = None
 
 import threading
@@ -170,6 +170,11 @@ def connect_user_deriv(user_id: int) -> tuple[bool, str]:
                     logger.info("✅ Deriv WebSocket connected and authorized!")
                     
                     trading_manager = TradingManager(deriv_ws)
+                    
+                    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    if telegram_token:
+                        setup_trading_callbacks(telegram_token)
+                        logger.info("✅ Trading callbacks configured for Telegram notifications")
                     
                     pair_scanner = PairScanner(deriv_ws)
                     pair_scanner.start_scanning()
@@ -1549,6 +1554,7 @@ def setup_trading_callbacks(telegram_token: str):
     def on_trade_opened(contract_type: str, price: float, stake: float, 
                        trade_num: int, target: int):
         """Callback saat posisi dibuka"""
+        logger.info(f"📤 on_trade_opened callback INVOKED: type={contract_type}, trade={trade_num}")
         target_text = f"/{target}" if target > 0 else ""
         stake_idr = stake * USD_TO_IDR
         message = (
@@ -1557,11 +1563,13 @@ def setup_trading_callbacks(telegram_token: str):
             f"• Entry: {price:.5f}\n"
             f"• Stake: ${stake:.2f} (Rp {stake_idr:,.0f})"
         )
-        send_telegram_message_sync(telegram_token, message)
+        result = send_telegram_message_sync(telegram_token, message)
+        logger.info(f"📤 on_trade_opened message sent: {result}")
         
     def on_trade_closed(is_win: bool, profit: float, balance: float,
                        trade_num: int, target: int, next_stake: float):
         """Callback saat posisi ditutup (win/loss)"""
+        logger.info(f"📥 on_trade_closed callback INVOKED: win={is_win}, profit={profit}, trade={trade_num}")
         target_text = f"/{target}" if target > 0 else ""
         profit_idr = profit * USD_TO_IDR
         balance_idr = balance * USD_TO_IDR
@@ -1581,7 +1589,8 @@ def setup_trading_callbacks(telegram_token: str):
                 f"• Next Stake: ${next_stake:.2f} (Rp {next_stake_idr:,.0f})"
             )
             
-        send_telegram_message_sync(telegram_token, message)
+        result = send_telegram_message_sync(telegram_token, message)
+        logger.info(f"📥 on_trade_closed message sent: {result}")
         
     def on_session_complete(total: int, wins: int, losses: int, 
                            profit: float, win_rate: float):

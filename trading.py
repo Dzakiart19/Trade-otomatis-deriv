@@ -329,8 +329,8 @@ class TradingManager:
         self.last_progress_notification_time: float = 0.0
         self.last_notified_milestone: int = -1  # Track last milestone to avoid duplicate
         self.sent_milestones: set = set()  # Track ALL milestones sent in this session
-        self.PROGRESS_MILESTONES = [0, 50, 100]  # Reduced milestones to minimize notifications
-        self.MIN_PROGRESS_NOTIFICATION_INTERVAL = 30.0  # 30 seconds debounce between notifications
+        self.PROGRESS_MILESTONES = [0, 25, 50, 75, 100]  # More milestones for real-time feel
+        self.MIN_PROGRESS_NOTIFICATION_INTERVAL = 3.0  # 3 seconds debounce for faster updates
         
         # Statistics
         self.stats = SessionStats()
