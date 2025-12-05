@@ -289,15 +289,20 @@ Format Durasi:
 1. **Auto-Adjust Stake untuk Risk Limit**
    - Fungsi `_calculate_max_safe_stake()` baru untuk hitung stake aman
    - Menggunakan geometric series untuk proyeksi martingale
-   - Auto-adjust stake saat exposure melebihi 30% limit
-   - Tidak lagi stop trading, tapi adjust stake ke nilai aman
+   - Auto-adjust stake saat exposure melebihi limit
+   - Tidak lagi stop trading, tapi cap stake ke nilai aman
 
-2. **Pre-Check Stake vs Balance**
-   - Warning di `configure()` jika stake terlalu tinggi untuk balance
-   - Info di `start()` tentang auto-adjust yang akan terjadi
-   - User aware sebelum trading dimulai
+2. **Martingale-Aware Risk Check**
+   - Saat dalam martingale sequence (level > 0), gunakan lookahead 2 level (bukan 3)
+   - Trading tetap berjalan dengan stake yang di-cap
+   - Hanya stop jika balance < minimum stake
 
-3. **Bug Fix TradingState**
+3. **Reduced Notification Spam**
+   - Menghapus warning berlebihan saat configure dan start
+   - Risk info hanya di-log, tidak dikirim ke user
+   - Trading lebih bersih tanpa interupsi
+
+4. **Bug Fix TradingState**
    - Fixed TradingState enum di shutdown handler (main.py)
    - TRADING/WAITING → RUNNING/WAITING_RESULT
 

@@ -1318,19 +1318,23 @@ class TradingManager:
         
         return projected_loss + max(0, current_loss)
     
-    def _calculate_max_safe_stake(self, balance: float) -> float:
+    def _calculate_max_safe_stake(self, balance: float, lookahead_levels: Optional[int] = None) -> float:
         """
         Hitung stake maksimum yang aman untuk martingale N level.
         
         Args:
             balance: Current balance
+            lookahead_levels: Jumlah level lookahead (default: MARTINGALE_LOOK_AHEAD_LEVELS)
             
         Returns:
             Maximum safe stake yang tidak melebihi risk limit
         """
+        if lookahead_levels is None:
+            lookahead_levels = self.MARTINGALE_LOOK_AHEAD_LEVELS
+            
         max_exposure = balance * self.MAX_TOTAL_RISK_PERCENT
         multiplier = self._get_adaptive_martingale_multiplier()
-        n = self.MARTINGALE_LOOK_AHEAD_LEVELS
+        n = lookahead_levels
         
         # Sum of geometric series: a + a*r + a*r^2 + ... + a*r^(n-1)
         # = a * (1 - r^n) / (1 - r) where a = stake, r = multiplier
@@ -1353,7 +1357,11 @@ class TradingManager:
         """
         Perform pre-flight risk validation sebelum execute trade.
         Task 4: Enhanced Risk Management Validation.
-        Fixed: Query latest balance dari WebSocket untuk accuracy.
+        
+        v2.2 Update: Lebih fleksibel untuk martingale sequence
+        - Saat dalam martingale (level > 0), gunakan lookahead 2 level
+        - Selalu cap stake ke nilai aman, jangan stop trading
+        - Hanya stop jika balance terlalu rendah untuk min stake
         
         Returns:
             Tuple (is_safe, message)
@@ -1364,75 +1372,51 @@ class TradingManager:
             logger.debug(f"Balance refreshed: ${current_balance:.2f} -> ${fresh_balance:.2f}")
             current_balance = fresh_balance
         
-        # Check 1: Martingale level 3 projection
-        projected_total = self._calculate_martingale_projection(self.MARTINGALE_LOOK_AHEAD_LEVELS)
-        if projected_total > current_balance:
-            msg = (
-                f"Martingale level {self.MARTINGALE_LOOK_AHEAD_LEVELS} projected stake "
-                f"(${projected_total:.2f}) melebihi balance (${current_balance:.2f})"
-            )
-            logger.warning(f"⚠️ Risk check warning: {msg}")
-            # Ini warning, bukan blocking
+        symbol_config = get_symbol_config(self.symbol)
+        min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
-        # Check 2: Total exposure calculation
-        total_exposure = self._calculate_total_exposure()
-        exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
+        # Tentukan lookahead berdasarkan martingale level
+        # Saat dalam sequence (level > 0), gunakan lookahead lebih rendah agar trading bisa lanjut
+        if self.martingale_level > 0:
+            lookahead = 2  # Lebih fleksibel saat dalam martingale sequence
+        else:
+            lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
         
-        # Check 3: Auto-adjust stake jika total risk > 30% balance
-        max_risk = current_balance * self.MAX_TOTAL_RISK_PERCENT
-        if total_exposure > max_risk:
-            # Coba auto-adjust stake ke nilai yang aman
-            safe_stake = self._calculate_max_safe_stake(current_balance)
-            symbol_config = get_symbol_config(self.symbol)
-            min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+        # Hitung max safe stake dengan lookahead yang sesuai
+        safe_stake = self._calculate_max_safe_stake(current_balance, lookahead)
+        
+        # Jika current stake melebihi safe stake, cap ke safe stake
+        if self.current_stake > safe_stake:
+            old_stake = self.current_stake
             
+            # Pastikan safe stake tidak di bawah minimum
             if safe_stake >= min_stake:
-                old_stake = self.current_stake
                 self.current_stake = safe_stake
-                self.base_stake = safe_stake
-                
-                logger.info(f"⚠️ Auto-adjust stake: ${old_stake:.2f} -> ${safe_stake:.2f} untuk memenuhi risk limit")
-                
-                # Recalculate exposure dengan stake baru
-                total_exposure = self._calculate_total_exposure()
-                exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
-                
-                if total_exposure <= max_risk:
-                    msg = f"Stake auto-adjusted ke ${safe_stake:.2f} (exposure: {exposure_percent:.1f}%)"
-                    logger.info(f"✅ {msg}")
-                    if self.on_error:
-                        self.on_error(f"⚠️ Stake disesuaikan dari ${old_stake:.2f} ke ${safe_stake:.2f} agar aman")
-                    # Lanjutkan trading dengan stake yang sudah disesuaikan
-                else:
-                    # Masih melebihi setelah adjustment, stop trading
-                    msg = (
-                        f"Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
-                        f"masih melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}% (${max_risk:.2f}) "
-                        f"setelah stake adjustment ke ${safe_stake:.2f}"
-                    )
-                    logger.error(f"🛑 Risk limit exceeded: {msg}")
-                    return False, msg
+                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (martingale level {self.martingale_level})")
             else:
-                # Stake minimum masih melebihi limit
-                msg = (
-                    f"Balance ${current_balance:.2f} terlalu rendah. "
-                    f"Minimum stake ${min_stake:.2f} menghasilkan exposure {exposure_percent:.1f}% "
-                    f"melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}%"
-                )
-                logger.error(f"🛑 Risk limit exceeded: {msg}")
+                # Balance terlalu rendah, tapi tetap coba dengan min stake
+                if current_balance >= min_stake:
+                    self.current_stake = min_stake
+                    logger.warning(f"⚠️ Stake adjusted to minimum: ${old_stake:.2f} -> ${min_stake:.2f}")
+                else:
+                    # Balance benar-benar tidak cukup
+                    msg = f"Balance ${current_balance:.2f} tidak cukup untuk minimum stake ${min_stake:.2f}"
+                    logger.error(f"🛑 {msg}")
+                    return False, msg
+        
+        # Pastikan stake tidak di bawah minimum
+        if self.current_stake < min_stake:
+            if current_balance >= min_stake:
+                self.current_stake = min_stake
+            else:
+                msg = f"Balance ${current_balance:.2f} tidak cukup untuk minimum stake ${min_stake:.2f}"
+                logger.error(f"🛑 {msg}")
                 return False, msg
         
-        # Check 4: Warning jika mendekati risk limit
-        warning_threshold = current_balance * self.RISK_WARNING_PERCENT
-        if total_exposure > warning_threshold:
-            msg = (
-                f"⚠️ RISK WARNING: Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
-                f"mendekati limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}%"
-            )
-            logger.warning(msg)
-            
-            if self.on_error:
-                self.on_error(msg)
+        # Log info exposure (tanpa mengirim notifikasi ke user untuk mengurangi spam)
+        total_exposure = self._calculate_total_exposure()
+        exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
+        logger.info(f"📊 Risk check: stake=${self.current_stake:.2f}, exposure={exposure_percent:.1f}%, level={self.martingale_level}")
         
         return True, "Risk check passed"
     
@@ -1576,19 +1560,13 @@ class TradingManager:
         # Simpan symbol dulu untuk digunakan di _calculate_max_safe_stake
         self.symbol = symbol
             
-        # Validasi stake vs balance - pre-check untuk menghindari error saat start
-        stake_warning = ""
+        # Log stake vs balance info (tanpa warning berlebihan ke user)
         if self.ws and self.ws.is_ready():
             current_balance = self.ws.get_balance()
             if current_balance > 0:
                 max_safe_stake = self._calculate_max_safe_stake(current_balance)
                 if stake > max_safe_stake:
-                    stake_warning = (
-                        f"\n\n⚠️ **PERINGATAN RISK:**\n"
-                        f"Stake ${stake:.2f} mungkin terlalu tinggi untuk balance ${current_balance:.2f}.\n"
-                        f"Stake akan otomatis disesuaikan ke ${max_safe_stake:.2f} saat trading untuk memenuhi risk limit 30%."
-                    )
-                    logger.warning(f"⚠️ Stake ${stake:.2f} > max safe ${max_safe_stake:.2f} untuk balance ${current_balance:.2f}")
+                    logger.info(f"📊 Stake ${stake:.2f} akan auto-adjust ke ${max_safe_stake:.2f} saat trading")
             
         self.base_stake = stake
         self.current_stake = stake
@@ -1602,7 +1580,7 @@ class TradingManager:
                 f"• Stake: ${stake}\n"
                 f"• Durasi: {duration}{duration_unit}\n"
                 f"• Target: {target_text}\n"
-                f"• Symbol: {symbol}{stake_warning}")
+                f"• Symbol: {symbol}")
                 
     def start(self) -> str:
         """
@@ -1679,20 +1657,12 @@ class TradingManager:
         
         target_text = f"{self.target_trades}" if self.target_trades > 0 else "∞"
         
-        # Pre-check stake vs balance dan info auto-adjust jika perlu
-        stake_info = ""
-        current_balance = self.stats.starting_balance
-        max_safe_stake = self._calculate_max_safe_stake(current_balance)
-        if self.base_stake > max_safe_stake:
-            stake_info = f"\n\n⚠️ Stake akan auto-adjust ke ${max_safe_stake:.2f} saat trade"
-            logger.info(f"Pre-check: Stake ${self.base_stake:.2f} akan di-adjust ke ${max_safe_stake:.2f}")
-        
         return (f"🚀 **AUTO TRADING STARTED**\n\n"
                 f"• Symbol: {self.symbol}\n"
                 f"• Stake: ${self.base_stake}\n"
                 f"• Durasi: {self.duration}{self.duration_unit}\n"
                 f"• Target: {target_text} trades\n"
-                f"• Saldo Awal: ${self.stats.starting_balance:.2f}{stake_info}\n\n"
+                f"• Saldo Awal: ${self.stats.starting_balance:.2f}\n\n"
                 f"⏳ Mengumpulkan data tick untuk analisis RSI...")
                 
     def stop(self) -> str:
