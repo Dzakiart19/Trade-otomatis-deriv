@@ -184,6 +184,18 @@ python test_real_trade.py
    - Profit/Loss juga dalam IDR
    - Kurs: 1 USD = Rp 15,800
 
+7. **Bug Fix: Telegram Notifications** (Latest)
+   - Fixed: "There is no current event loop in thread" error
+   - Menggunakan synchronous HTTP requests untuk mengirim notifikasi
+   - Notifikasi WIN/LOSS sekarang muncul instant tanpa error
+   - Thread-safe untuk WebSocket callbacks
+
+8. **Progress Notification**
+   - User menerima update real-time saat bot menganalisis market
+   - Format: "📊 Menganalisis market... (X/15 tick) | RSI: XX | Trend: XX"
+   - Update dikirim setiap 5 tick selama fase pengumpulan data
+   - Tidak spam - berhenti setelah RSI siap dikalkulasi
+
 ## Disclaimer
 
 Trading memiliki risiko tinggi. Bot ini untuk tujuan edukasi. Gunakan akun demo untuk testing sebelum menggunakan uang asli.
