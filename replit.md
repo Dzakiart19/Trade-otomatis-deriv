@@ -47,6 +47,12 @@ Do not make changes to the file `Y`.
     - Progress callback error handling.
 - **Multi-Account Support**: Supports both Demo and Real Deriv accounts.
 - **Chat ID Persistence**: Stores and validates Telegram Chat ID for secure messaging, requiring user confirmation.
+- **Per-User Token Authentication (v2.6)**:
+    - Users login with their own Deriv API token via Telegram (/login or /start)
+    - Tokens are encrypted using Fernet (AES-128) before storage
+    - WebSocket connects using user's token automatically after login
+    - Auto-reconnect on bot restart if saved session is valid
+    - Invalid sessions are auto-cleared when decryption fails (e.g., SESSION_SECRET rotation)
 
 ### Feature Specifications
 - **Supported Symbols**: Volatility indices (R_100, R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V) for 5-10 ticks duration, and frxXAUUSD (Gold/USD) for daily duration.
