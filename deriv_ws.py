@@ -131,6 +131,11 @@ class DerivWebSocket:
         self.tick_callbacks: Dict[str, Callable] = {}  # symbol -> callback function
         self.contract_subscription_id: Optional[str] = None
         
+        # Ticks history support
+        self._history_callbacks: Dict[str, Callable] = {}  # req_id -> callback
+        self._history_results: Dict[str, List[float]] = {}  # symbol -> prices
+        self._history_events: Dict[str, threading.Event] = {}  # symbol -> event
+        
         # Backward compatibility - keep legacy single subscription reference
         self.tick_subscription_id: Optional[str] = None  # Deprecated: use tick_subscriptions
         
@@ -250,6 +255,8 @@ class DerivWebSocket:
                 self._handle_buy_response(data)
             elif msg_type == "proposal_open_contract":
                 self._handle_contract_update(data)
+            elif msg_type == "history":
+                self._handle_ticks_history(data)
             elif msg_type == "ping":
                 # Deriv API responds to our ping with: {"msg_type": "ping", "ping": "pong"}
                 # This is the pong response to our ping request
@@ -432,6 +439,36 @@ class DerivWebSocket:
                 self.on_tick_callback(price_float, symbol)
             except Exception as e:
                 logger.error(f"Error in global tick callback: {e}")
+    
+    def _handle_ticks_history(self, data: dict):
+        """Handle response dari ticks_history request"""
+        if "error" in data:
+            error_msg = data.get("error", {}).get("message", "Unknown error")
+            logger.error(f"❌ Ticks history error: {error_msg}")
+            return
+            
+        history = data.get("history", {})
+        prices = history.get("prices", [])
+        
+        echo_req = data.get("echo_req", {})
+        symbol = echo_req.get("ticks_history", "")
+        req_id = str(data.get("req_id", ""))
+        
+        if symbol and prices:
+            with self.lock:
+                self._history_results[symbol] = [float(p) for p in prices]
+                
+            if symbol in self._history_events:
+                self._history_events[symbol].set()
+                
+            logger.info(f"📊 Received {len(prices)} historical ticks for {symbol}")
+            
+            if req_id in self._history_callbacks:
+                try:
+                    callback = self._history_callbacks.pop(req_id)
+                    callback(symbol, prices)
+                except Exception as e:
+                    logger.error(f"Error in history callback: {e}")
             
     def _handle_buy_response(self, data: dict):
         """Handle response dari buy contract"""
@@ -967,6 +1004,87 @@ class DerivWebSocket:
             logger.info(f"📊 Unsubscribed from all {num_subs} tick stream(s)")
         else:
             logger.warning(f"⚠️ Failed to send unsubscribe_all, cleared {num_subs} local subscription(s)")
+    
+    def get_ticks_history(
+        self, 
+        symbol: str, 
+        count: int = 100,
+        timeout: float = 10.0,
+        callback: Optional[Callable] = None
+    ) -> Optional[List[float]]:
+        """
+        Get historical tick prices for a symbol.
+        
+        Synchronous call that waits for response or uses callback.
+        Used to pre-load data for analysis.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., "R_100")
+            count: Number of ticks to retrieve (max 5000)
+            timeout: Timeout in seconds to wait for response
+            callback: Optional callback for async operation.
+                      Signature: callback(symbol: str, prices: List[float])
+                      
+        Returns:
+            List of historical prices, or None if failed/timeout
+            
+        Example:
+            # Synchronous
+            prices = ws.get_ticks_history("R_100", count=50)
+            
+            # Asynchronous with callback
+            ws.get_ticks_history("R_100", count=50, callback=my_callback)
+        """
+        if not self.is_ready():
+            logger.warning("Cannot get history: WebSocket not ready")
+            return None
+            
+        count = min(max(count, 10), 5000)
+        
+        self.request_id += 1
+        req_id = str(self.request_id)
+        
+        self._history_events[symbol] = threading.Event()
+        
+        if callback:
+            self._history_callbacks[req_id] = callback
+        
+        payload = {
+            "ticks_history": symbol,
+            "adjust_start_time": 1,
+            "count": count,
+            "end": "latest",
+            "style": "ticks",
+            "req_id": int(req_id)
+        }
+        
+        success = self._send(payload)
+        
+        if not success:
+            logger.error(f"Failed to send ticks_history request for {symbol}")
+            self._history_events.pop(symbol, None)
+            return None
+            
+        logger.debug(f"📊 Requesting {count} historical ticks for {symbol}")
+        
+        if callback:
+            return None
+        
+        try:
+            event = self._history_events.get(symbol)
+            if event and event.wait(timeout):
+                with self.lock:
+                    prices = self._history_results.pop(symbol, None)
+                return prices
+            else:
+                logger.warning(f"⏳ Timeout waiting for ticks history: {symbol}")
+                with self.lock:
+                    self._history_callbacks.pop(req_id, None)
+                return None
+        finally:
+            with self.lock:
+                self._history_events.pop(symbol, None)
+                self._history_results.pop(symbol, None)
     
     def get_subscribed_symbols(self) -> List[str]:
         """

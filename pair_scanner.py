@@ -164,12 +164,60 @@ class PairScanner:
         except Exception as e:
             logger.error(f"Error processing tick for {symbol}: {e}")
             
-    def start_scanning(self) -> bool:
+    def _preload_historical_data(self) -> int:
+        """
+        Pre-load historical tick data untuk semua pairs.
+        
+        Mengambil historical ticks dari Deriv API dan memasukkannya
+        ke masing-masing strategy untuk analisis langsung.
+        
+        Returns:
+            Jumlah pairs yang berhasil di-preload
+        """
+        preload_count = 0
+        total_symbols = len(self.strategies)
+        
+        logger.info(f"📥 Pre-loading historical data for {total_symbols} pairs...")
+        
+        for symbol in self.strategies.keys():
+            try:
+                prices = self.deriv_ws.get_ticks_history(
+                    symbol=symbol,
+                    count=self.min_ticks_required + 20,
+                    timeout=10.0
+                )
+                
+                if prices and len(prices) >= self.min_ticks_required:
+                    with self._lock:
+                        strategy = self.strategies[symbol]
+                        for price in prices:
+                            strategy.add_tick(float(price))
+                        self.tick_counts[symbol] = len(prices)
+                        
+                    preload_count += 1
+                    logger.info(f"✓ Pre-loaded {len(prices)} ticks for {symbol}")
+                else:
+                    logger.warning(f"✗ Insufficient history for {symbol}: {len(prices) if prices else 0} ticks")
+                    
+                time.sleep(0.2)
+                
+            except Exception as e:
+                logger.error(f"Error pre-loading {symbol}: {e}")
+                
+        logger.info(f"📥 Pre-load complete: {preload_count}/{total_symbols} pairs ready")
+        return preload_count
+    
+    def start_scanning(self, preload_data: bool = True) -> bool:
         """
         Mulai scanning dengan subscribe ke semua short-term symbols.
         
         Subscribe ke tick stream untuk setiap symbol menggunakan
         deriv_ws.subscribe_ticks() dengan callback _on_tick.
+        
+        Args:
+            preload_data: Jika True, pre-load historical data terlebih dahulu
+                          agar analisis bisa langsung dimulai tanpa menunggu.
+                          Default: True
         
         Returns:
             True jika scanning berhasil dimulai, False jika gagal
@@ -187,6 +235,11 @@ class PairScanner:
             return False
             
         logger.info("🚀 Starting multi-pair scanner...")
+        
+        if preload_data:
+            preload_count = self._preload_historical_data()
+            if preload_count == 0:
+                logger.warning("⚠️ No pairs pre-loaded, will collect data from live stream")
         
         success_count = 0
         fail_count = 0
@@ -213,9 +266,11 @@ class PairScanner:
                 
         self.is_scanning = True
         
+        ready_count = sum(1 for c in self.tick_counts.values() if c >= self.min_ticks_required)
+        
         logger.info(
             f"✅ Scanner started: {success_count} subscribed, "
-            f"{fail_count} failed, {len(self.strategies)} total"
+            f"{fail_count} failed, {ready_count} pairs ready for analysis"
         )
         
         return success_count > 0
