@@ -1370,7 +1370,7 @@ class TradingManager:
         Returns:
             Total projected stake untuk semua level
         """
-        multiplier = self._get_adaptive_martingale_multiplier()
+        multiplier = self._get_martingale_multiplier()
         total_stake = 0.0
         current_projected_stake = self.current_stake
         
@@ -1423,7 +1423,7 @@ class TradingManager:
             lookahead_levels = self.MARTINGALE_LOOK_AHEAD_LEVELS
             
         max_exposure = balance * self.MAX_TOTAL_RISK_PERCENT
-        multiplier = self._get_adaptive_martingale_multiplier()
+        multiplier = self._get_martingale_multiplier()
         n = lookahead_levels
         
         # Sum of geometric series: a + a*r + a*r^2 + ... + a*r^(n-1)
@@ -1639,7 +1639,7 @@ class TradingManager:
             return
         
         # RISK CHECK 4: Cek apakah stake berikutnya (Martingale) melebihi balance
-        multiplier = self._get_adaptive_martingale_multiplier()
+        multiplier = self._get_martingale_multiplier()
         projected_next_stake = self.current_stake * multiplier
         if projected_next_stake > current_balance:
             logger.warning(f"⚠️ Balance mungkin tidak cukup untuk Martingale! Next stake: ${projected_next_stake:.2f}, Balance: ${current_balance:.2f}")
