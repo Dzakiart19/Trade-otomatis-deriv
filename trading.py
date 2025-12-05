@@ -1359,13 +1359,21 @@ class TradingManager:
         
         return projected_loss + max(0, current_loss)
     
-    def _calculate_max_safe_stake(self, balance: float, lookahead_levels: Optional[int] = None) -> float:
+    def _calculate_max_safe_stake(self, balance: float, lookahead_levels: Optional[int] = None,
+                                    volatility_zone: Optional[str] = None) -> float:
         """
         Hitung stake maksimum yang aman untuk martingale N level.
+        
+        Enhancement v2.3: Integrate volatility_zone adjustment
+        - EXTREME_LOW zone: stake * 0.5
+        - LOW zone: stake * 0.7
+        - NORMAL zone: stake * 1.0
+        - HIGH/EXTREME_HIGH zone: stake * 0.85
         
         Args:
             balance: Current balance
             lookahead_levels: Jumlah level lookahead (default: MARTINGALE_LOOK_AHEAD_LEVELS)
+            volatility_zone: Volatility zone dari strategy ("EXTREME_LOW", "LOW", "NORMAL", "HIGH", "EXTREME_HIGH")
             
         Returns:
             Maximum safe stake yang tidak melebihi risk limit
@@ -1396,7 +1404,29 @@ class TradingManager:
         hard_cap = balance * 0.25
         max_stake = min(max_stake, hard_cap)
         
-        return round(max(min_stake, max_stake), 2)
+        # Ensure minimum stake
+        max_stake = max(min_stake, max_stake)
+        
+        # v2.3: Apply volatility zone adjustment AFTER ensuring minimum
+        # This allows volatility to reduce stakes above minimum but never below it
+        if volatility_zone:
+            volatility_adjustments = {
+                "EXTREME_LOW": 0.5,
+                "LOW": 0.7,
+                "NORMAL": 1.0,
+                "HIGH": 0.85,
+                "EXTREME_HIGH": 0.85,
+                "UNKNOWN": 1.0
+            }
+            vol_multiplier = volatility_adjustments.get(volatility_zone, 1.0)
+            if vol_multiplier != 1.0 and max_stake > min_stake:
+                old_max_stake = max_stake
+                # Apply volatility adjustment but never go below min_stake
+                adjusted_stake = max_stake * vol_multiplier
+                max_stake = max(min_stake, adjusted_stake)
+                logger.info(f"📊 Volatility adjustment: {volatility_zone} -> stake * {vol_multiplier} (${old_max_stake:.2f} -> ${max_stake:.2f})")
+        
+        return round(max_stake, 2)
     
     def _perform_preflight_risk_check(self, current_balance: float) -> tuple[bool, str]:
         """
@@ -1408,6 +1438,12 @@ class TradingManager:
         - Hard cap 25% balance untuk stake maksimum
         - Selalu cap stake ke nilai aman, jangan stop trading
         - Hanya stop jika balance terlalu rendah untuk min stake
+        
+        v2.3 Update: Integrate volatility zone adjustment
+        - EXTREME_LOW zone: stake * 0.5
+        - LOW zone: stake * 0.7
+        - NORMAL zone: stake * 1.0
+        - HIGH/EXTREME_HIGH zone: stake * 0.85
         
         Returns:
             Tuple (is_safe, message)
@@ -1421,6 +1457,15 @@ class TradingManager:
         symbol_config = get_symbol_config(self.symbol)
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
+        # v2.3: Get volatility zone dari strategy untuk stake adjustment
+        volatility_zone = "NORMAL"
+        try:
+            vol_zone, vol_mult = self.strategy.get_volatility_zone()
+            volatility_zone = vol_zone
+            logger.debug(f"📊 Volatility zone: {volatility_zone} (multiplier: {vol_mult})")
+        except Exception as e:
+            logger.debug(f"Could not get volatility zone: {e}, using NORMAL")
+        
         # Tentukan lookahead berdasarkan martingale level
         # Saat dalam sequence (level > 0), gunakan lookahead 3 level untuk balance fleksibilitas dan safety
         if self.martingale_level > 0:
@@ -1428,8 +1473,8 @@ class TradingManager:
         else:
             lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
         
-        # Hitung max safe stake dengan lookahead yang sesuai
-        safe_stake = self._calculate_max_safe_stake(current_balance, lookahead)
+        # Hitung max safe stake dengan lookahead dan volatility zone
+        safe_stake = self._calculate_max_safe_stake(current_balance, lookahead, volatility_zone)
         
         # Hard cap: stake tidak boleh lebih dari 25% balance
         max_stake_cap = current_balance * 0.25
@@ -1445,7 +1490,7 @@ class TradingManager:
             # Pastikan safe stake tidak di bawah minimum
             if safe_stake >= min_stake:
                 self.current_stake = safe_stake
-                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (martingale level {self.martingale_level})")
+                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (martingale level {self.martingale_level}, vol zone: {volatility_zone})")
             else:
                 # Balance terlalu rendah, tapi tetap coba dengan min stake
                 if current_balance >= min_stake:
@@ -1466,10 +1511,10 @@ class TradingManager:
                 logger.error(f"🛑 {msg}")
                 return False, msg
         
-        # Log info exposure (tanpa mengirim notifikasi ke user untuk mengurangi spam)
+        # Log info exposure dengan volatility zone
         total_exposure = self._calculate_total_exposure()
         exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
-        logger.info(f"📊 Risk check: stake=${self.current_stake:.2f}, exposure={exposure_percent:.1f}%, level={self.martingale_level}")
+        logger.info(f"📊 Risk check: stake=${self.current_stake:.2f}, exposure={exposure_percent:.1f}%, level={self.martingale_level}, vol_zone={volatility_zone}")
         
         return True, "Risk check passed"
     
