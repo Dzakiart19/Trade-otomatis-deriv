@@ -58,6 +58,90 @@ CHAT_ID_FILE = "logs/active_chat_id.txt"
 
 load_dotenv()
 
+
+def escape_md_chars(text: str) -> str:
+    """Escape special Markdown characters to prevent parsing errors"""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+def markdown_to_html(text: str) -> str:
+    """Convert basic Markdown to HTML for fallback"""
+    import re
+    text = text.replace('**', '<b>').replace('*', '<i>')
+    text = re.sub(r'<b>([^<]+)<b>', r'<b>\1</b>', text)
+    text = re.sub(r'<i>([^<]+)<i>', r'<i>\1</i>', text)
+    text = text.replace('`', '<code>').replace('<code><code>', '</code>')
+    text = re.sub(r'<code>([^<]+)<code>', r'<code>\1</code>', text)
+    return text
+
+
+async def safe_send_message(
+    target,
+    text: str,
+    reply_markup=None,
+    is_edit: bool = False
+) -> bool:
+    """
+    Send message with Markdown, fallback to HTML if parsing fails.
+    
+    Args:
+        target: Update.message or CallbackQuery for sending
+        text: Message text
+        reply_markup: Optional keyboard markup
+        is_edit: True if editing existing message
+        
+    Returns:
+        True if message sent successfully
+    """
+    try:
+        if is_edit:
+            await target.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await target.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        return True
+    except Exception as e:
+        if "Can't parse entities" in str(e) or "parse" in str(e).lower():
+            try:
+                html_text = markdown_to_html(text)
+                if is_edit:
+                    await target.edit_message_text(
+                        html_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await target.reply_text(
+                        html_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                return True
+            except Exception as e2:
+                try:
+                    plain_text = text.replace('**', '').replace('*', '').replace('`', '')
+                    if is_edit:
+                        await target.edit_message_text(plain_text, reply_markup=reply_markup)
+                    else:
+                        await target.reply_text(plain_text, reply_markup=reply_markup)
+                    return True
+                except Exception as e3:
+                    logger.error(f"Failed to send message: {e3}")
+                    return False
+        else:
+            logger.error(f"Message send error: {e}")
+            return False
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -1096,11 +1180,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             if config_msg.startswith("❌"):
-                await query.edit_message_text(config_msg, parse_mode="Markdown")
+                try:
+                    await query.edit_message_text(config_msg, parse_mode="Markdown")
+                except Exception:
+                    await query.edit_message_text(config_msg)
                 return
                 
             result = trading_manager.start()
-            await query.edit_message_text(f"{config_msg}\n\n{result}", parse_mode="Markdown")
+            combined_msg = f"{config_msg}\n\n{result}"
+            try:
+                await query.edit_message_text(combined_msg, parse_mode="Markdown")
+            except Exception:
+                try:
+                    await query.edit_message_text(markdown_to_html(combined_msg), parse_mode="HTML")
+                except Exception:
+                    await query.edit_message_text(combined_msg.replace('*', '').replace('`', ''))
             
     elif data == "quick_menu":
         trade_text = (

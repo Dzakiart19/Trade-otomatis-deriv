@@ -58,6 +58,12 @@ Do not make changes to the file `Y`.
     - **Faster Updates**: Reduced notification debounce from 10s to 2s for progress, 30s to 3s for trade milestones
     - **More Milestones**: Progress notifications at 0%, 25%, 50%, 75%, 100% for better visibility
     - **Callback Logging**: on_trade_opened and on_trade_closed now log invocation for debugging
+- **Martingale Recovery Priority (v2.9)**:
+    - **Risk Check Override**: Saat dalam martingale sequence, stake TIDAK diturunkan oleh volatility adjustment
+    - **Higher Cap for Martingale**: Batas stake dinaikkan dari 25% ke 50% balance saat dalam martingale recovery
+    - **Stake Preservation**: Stake martingale dipertahankan di configure(), start(), dan risk check
+    - **Telegram Message Fallback**: Helper function untuk handle Markdown parsing error dengan fallback ke HTML/plain text
+    - **Session Recovery Validation**: Validasi umur file (30 menit max), data integrity check, dan martingale level validation
 
 ### Feature Specifications
 - **Supported Symbols**: Volatility indices (R_100, R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V) for 5-10 ticks duration, and frxXAUUSD (Gold/USD) for daily duration.
