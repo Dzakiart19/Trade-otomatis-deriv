@@ -284,6 +284,23 @@ Format Durasi:
     - Memory cleanup otomatis
     - Mengurangi memory usage
 
+### Version 2.2 - Auto-Adjust Stake (2025-12-05)
+
+1. **Auto-Adjust Stake untuk Risk Limit**
+   - Fungsi `_calculate_max_safe_stake()` baru untuk hitung stake aman
+   - Menggunakan geometric series untuk proyeksi martingale
+   - Auto-adjust stake saat exposure melebihi 30% limit
+   - Tidak lagi stop trading, tapi adjust stake ke nilai aman
+
+2. **Pre-Check Stake vs Balance**
+   - Warning di `configure()` jika stake terlalu tinggi untuk balance
+   - Info di `start()` tentang auto-adjust yang akan terjadi
+   - User aware sebelum trading dimulai
+
+3. **Bug Fix TradingState**
+   - Fixed TradingState enum di shutdown handler (main.py)
+   - TRADING/WAITING → RUNNING/WAITING_RESULT
+
 ## Development
 
 ### Dependencies
