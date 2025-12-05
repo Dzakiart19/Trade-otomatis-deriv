@@ -70,9 +70,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_chat_id = update.effective_chat.id
     
     welcome_text = (
-        "🤖 **DERIV AUTO TRADING BOT**\n\n"
+        "🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
         "Bot trading otomatis untuk Binary Options (Volatility Index).\n"
-        "Menggunakan strategi RSI + Martingale.\n\n"
+        "Menggunakan Multi-Indicator Strategy + Adaptive Martingale.\n\n"
+        "📊 **Indicators:** RSI, EMA, MACD, Stochastic, ATR\n\n"
         "📋 **Menu Utama:**\n"
         "• /akun - Kelola akun (saldo, switch demo/real)\n"
         "• /autotrade - Mulai auto trading\n"
@@ -768,18 +769,30 @@ def setup_trading_callbacks(telegram_token: str):
     
     def on_progress(tick_count: int, required_ticks: int, rsi: float, trend: str):
         """Callback untuk progress notification saat mengumpulkan data"""
+        logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}")
+        
         if rsi > 0:
             rsi_text = f"{rsi:.1f}"
         else:
             rsi_text = "calculating..."
+            
+        progress_pct = int((tick_count / required_ticks) * 100)
+        progress_bar = "▓" * (progress_pct // 10) + "░" * (10 - progress_pct // 10)
+        
         message = (
             f"📊 **Menganalisis market...**\n\n"
+            f"• Progress: [{progress_bar}] {progress_pct}%\n"
             f"• Tick: {tick_count}/{required_ticks}\n"
             f"• RSI: {rsi_text}\n"
             f"• Trend: {trend}\n\n"
             f"⏳ Menunggu sinyal trading..."
         )
-        send_telegram_message_sync(telegram_token, message)
+        
+        result = send_telegram_message_sync(telegram_token, message)
+        if result:
+            logger.info(f"✅ Progress message sent successfully")
+        else:
+            logger.error(f"❌ Failed to send progress message")
         
     trading_manager.on_trade_opened = on_trade_opened
     trading_manager.on_trade_closed = on_trade_closed

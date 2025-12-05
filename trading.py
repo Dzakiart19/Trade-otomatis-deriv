@@ -1,24 +1,33 @@
 """
 =============================================================
-TRADING MANAGER - Eksekusi & Money Management
+TRADING MANAGER - Eksekusi & Money Management v2.0
 =============================================================
 Modul ini menangani eksekusi trading, Martingale system,
 dan tracking hasil trading.
 
 Fitur:
 - Auto trading dengan target jumlah trade
-- Martingale money management
+- Adaptive Martingale money management (dynamic multiplier)
 - Real-time win/loss detection
-- Session statistics
+- Session statistics & analytics
+- ATR-based TP/SL monitoring
+- Enhanced error handling with exponential backoff
+
+Enhancement v2.0:
+- SessionAnalytics class for performance tracking
+- Adaptive martingale based on rolling win rate
+- Improved risk management
 =============================================================
 """
 
 import asyncio
 import logging
-from typing import Optional, Callable, Dict, Any
+import json
+from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
+from collections import deque
 
 from strategy import TradingStrategy, Signal, AnalysisResult
 from deriv_ws import DerivWebSocket, AccountType
@@ -33,11 +42,9 @@ from symbols import (
 import csv
 import os
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Trade journal directory
 LOGS_DIR = "logs"
 if not os.path.exists(LOGS_DIR):
     os.makedirs(LOGS_DIR)
@@ -91,22 +98,159 @@ class SessionStats:
         return self.current_balance - self.starting_balance
 
 
+class SessionAnalytics:
+    """
+    Performance analytics untuk tracking dan optimization.
+    Tracks rolling win rate, hourly performance, dan martingale effectiveness.
+    """
+    
+    ROLLING_WINDOW = 20
+    
+    def __init__(self):
+        self.trade_results: deque = deque(maxlen=100)
+        self.hourly_profits: Dict[str, float] = {}
+        self.martingale_recoveries: int = 0
+        self.martingale_failures: int = 0
+        self.rsi_thresholds_performance: Dict[str, Dict] = {}
+        self.max_drawdown: float = 0.0
+        self.peak_balance: float = 0.0
+        
+    def add_trade(self, is_win: bool, profit: float, stake: float, 
+                  rsi_value: float, current_balance: float):
+        """Record trade result for analytics"""
+        hour = datetime.now().strftime("%Y-%m-%d %H:00")
+        
+        self.trade_results.append({
+            "timestamp": datetime.now(),
+            "is_win": is_win,
+            "profit": profit,
+            "stake": stake,
+            "rsi": rsi_value
+        })
+        
+        if hour not in self.hourly_profits:
+            self.hourly_profits[hour] = 0.0
+        self.hourly_profits[hour] += profit
+        
+        if current_balance > self.peak_balance:
+            self.peak_balance = current_balance
+        
+        current_drawdown = self.peak_balance - current_balance
+        if current_drawdown > self.max_drawdown:
+            self.max_drawdown = current_drawdown
+            
+        rsi_bucket = f"{int(rsi_value // 10) * 10}-{int(rsi_value // 10) * 10 + 10}"
+        if rsi_bucket not in self.rsi_thresholds_performance:
+            self.rsi_thresholds_performance[rsi_bucket] = {"wins": 0, "losses": 0, "profit": 0.0}
+        
+        if is_win:
+            self.rsi_thresholds_performance[rsi_bucket]["wins"] += 1
+        else:
+            self.rsi_thresholds_performance[rsi_bucket]["losses"] += 1
+        self.rsi_thresholds_performance[rsi_bucket]["profit"] += profit
+        
+    def record_martingale_result(self, recovered: bool):
+        """Track martingale recovery success"""
+        if recovered:
+            self.martingale_recoveries += 1
+        else:
+            self.martingale_failures += 1
+            
+    def get_rolling_win_rate(self) -> float:
+        """Calculate rolling win rate over last N trades"""
+        if not self.trade_results:
+            return 50.0
+            
+        recent = list(self.trade_results)[-self.ROLLING_WINDOW:]
+        if not recent:
+            return 50.0
+            
+        wins = sum(1 for t in recent if t["is_win"])
+        return (wins / len(recent)) * 100
+        
+    def get_martingale_success_rate(self) -> float:
+        """Calculate martingale recovery success rate"""
+        total = self.martingale_recoveries + self.martingale_failures
+        if total == 0:
+            return 0.0
+        return (self.martingale_recoveries / total) * 100
+        
+    def get_best_rsi_range(self) -> str:
+        """Find RSI range with best performance"""
+        if not self.rsi_thresholds_performance:
+            return "N/A"
+            
+        best_range = max(
+            self.rsi_thresholds_performance.items(),
+            key=lambda x: x[1]["profit"],
+            default=(None, None)
+        )
+        return best_range[0] if best_range[0] else "N/A"
+        
+    def get_summary(self) -> str:
+        """Generate analytics summary"""
+        rolling_wr = self.get_rolling_win_rate()
+        martingale_sr = self.get_martingale_success_rate()
+        best_rsi = self.get_best_rsi_range()
+        
+        return (
+            f"📈 **SESSION ANALYTICS**\n\n"
+            f"• Rolling WR (last {self.ROLLING_WINDOW}): {rolling_wr:.1f}%\n"
+            f"• Max Drawdown: ${self.max_drawdown:.2f}\n"
+            f"• Martingale Success: {martingale_sr:.1f}%\n"
+            f"• Best RSI Range: {best_rsi}\n"
+            f"• Total Trades Analyzed: {len(self.trade_results)}"
+        )
+        
+    def export_to_json(self, filepath: str):
+        """Export analytics to JSON file"""
+        data = {
+            "export_time": datetime.now().isoformat(),
+            "rolling_win_rate": self.get_rolling_win_rate(),
+            "max_drawdown": self.max_drawdown,
+            "peak_balance": self.peak_balance,
+            "martingale_recoveries": self.martingale_recoveries,
+            "martingale_failures": self.martingale_failures,
+            "hourly_profits": self.hourly_profits,
+            "rsi_performance": self.rsi_thresholds_performance,
+            "trade_count": len(self.trade_results)
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+        logger.info(f"📊 Analytics exported to {filepath}")
+
+
 class TradingManager:
     """
     Kelas utama untuk mengelola trading session.
     Menggabungkan strategi, eksekusi, dan money management.
     Mendukung multiple trading pairs dengan validasi otomatis.
+    
+    Features v2.0:
+    - Adaptive Martingale based on rolling win rate
+    - Multi-indicator confirmation signals
+    - ATR-based TP/SL monitoring
+    - Real-time session analytics
     """
     
-    MARTINGALE_MULTIPLIER = 2.1
+    MARTINGALE_MULTIPLIER_AGGRESSIVE = 2.5
+    MARTINGALE_MULTIPLIER_NORMAL = 2.1
+    MARTINGALE_MULTIPLIER_CONSERVATIVE = 1.8
+    MAX_MARTINGALE_LEVEL = 5
     
-    # Risk Management Constants
-    MAX_LOSS_PERCENT = 0.20  # 20% dari balance awal
-    MAX_CONSECUTIVE_LOSSES = 5  # Auto stop setelah 5 loss berturut
-    TRADE_COOLDOWN_SECONDS = 2.0  # Cooldown minimal antar trade
-    MAX_BUY_RETRY = 3  # Max retry untuk buy contract
-    MAX_DAILY_LOSS = 50.0  # Max daily loss dalam USD
-    SIGNAL_PROCESSING_TIMEOUT = 120.0  # Timeout untuk processing signal (detik)
+    WIN_RATE_AGGRESSIVE_THRESHOLD = 60.0
+    WIN_RATE_CONSERVATIVE_THRESHOLD = 40.0
+    
+    MAX_LOSS_PERCENT = 0.20
+    MAX_CONSECUTIVE_LOSSES = 5
+    TRADE_COOLDOWN_SECONDS = 2.0
+    MAX_BUY_RETRY = 5
+    MAX_DAILY_LOSS = 50.0
+    SIGNAL_PROCESSING_TIMEOUT = 120.0
+    
+    RETRY_BASE_DELAY = 5.0
+    RETRY_MAX_DELAY = 60.0
     
     def __init__(self, deriv_ws: DerivWebSocket):
         """
@@ -146,6 +290,11 @@ class TradingManager:
         # Statistics
         self.stats = SessionStats()
         self.trade_history: list[TradeResult] = []
+        self.analytics = SessionAnalytics()
+        
+        # Adaptive Martingale tracking
+        self.martingale_level: int = 0
+        self.in_martingale_sequence: bool = False
         
         # Callbacks untuk notifikasi Telegram
         self.on_trade_opened: Optional[Callable] = None
@@ -157,7 +306,7 @@ class TradingManager:
         # Progress tracking
         self.tick_count: int = 0
         self.progress_interval: int = 5
-        self.required_ticks: int = 15
+        self.required_ticks: int = 21
         
         # Setup WebSocket callbacks
         self._setup_callbacks()
@@ -168,6 +317,27 @@ class TradingManager:
         self.ws.on_buy_response_callback = self._on_buy_response
         self.ws.on_contract_update_callback = self._on_contract_update
         self.ws.on_balance_update_callback = self._on_balance_update
+        
+    def _get_adaptive_martingale_multiplier(self) -> float:
+        """
+        Get adaptive martingale multiplier based on rolling win rate.
+        
+        Returns:
+            Multiplier value (1.8 conservative, 2.1 normal, 2.5 aggressive)
+        """
+        rolling_wr = self.analytics.get_rolling_win_rate()
+        
+        if rolling_wr >= self.WIN_RATE_AGGRESSIVE_THRESHOLD:
+            multiplier = self.MARTINGALE_MULTIPLIER_AGGRESSIVE
+            logger.debug(f"📈 Adaptive Martingale: AGGRESSIVE (WR={rolling_wr:.1f}%)")
+        elif rolling_wr <= self.WIN_RATE_CONSERVATIVE_THRESHOLD:
+            multiplier = self.MARTINGALE_MULTIPLIER_CONSERVATIVE
+            logger.debug(f"📉 Adaptive Martingale: CONSERVATIVE (WR={rolling_wr:.1f}%)")
+        else:
+            multiplier = self.MARTINGALE_MULTIPLIER_NORMAL
+            logger.debug(f"⚖️ Adaptive Martingale: NORMAL (WR={rolling_wr:.1f}%)")
+            
+        return multiplier
         
     def _on_tick(self, price: float, symbol: str):
         """
@@ -186,7 +356,6 @@ class TradingManager:
         # ANTI-DOUBLE BUY: Jika sedang processing signal, check timeout
         current_time = time_module.time()
         if self.is_processing_signal:
-            # Check for timeout - if signal processing takes too long, reset
             if self.signal_processing_start_time > 0:
                 elapsed = current_time - self.signal_processing_start_time
                 if elapsed > self.SIGNAL_PROCESSING_TIMEOUT:
@@ -215,16 +384,27 @@ class TradingManager:
             current_tick_count = stats['tick_count']
             
             # Progress notification - kirim saat collecting data
-            if current_tick_count <= self.required_ticks:
-                if self.tick_count % self.progress_interval == 0:
-                    if self.on_progress:
-                        rsi_value = stats['rsi'] if current_tick_count >= self.required_ticks else 0
-                        trend = stats['trend']
-                        logger.info(f"📊 Progress: {current_tick_count}/{self.required_ticks} ticks | RSI: {rsi_value}")
-                        try:
-                            self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
-                        except Exception as e:
-                            logger.error(f"Error calling on_progress callback: {e}")
+            # Send notification at first tick (immediate feedback) and every progress_interval
+            should_notify = (
+                current_tick_count <= self.required_ticks and 
+                (self.tick_count == 1 or self.tick_count % self.progress_interval == 0)
+            )
+            
+            if should_notify:
+                logger.info(f"📊 Progress notification triggered: tick_count={self.tick_count}, strategy_ticks={current_tick_count}")
+                if self.on_progress:
+                    rsi_value = stats['rsi'] if current_tick_count >= 15 else 0
+                    trend = stats['trend']
+                    logger.info(f"📊 Sending progress: {current_tick_count}/{self.required_ticks} ticks | RSI: {rsi_value} | Trend: {trend}")
+                    try:
+                        self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
+                        logger.info("✅ Progress callback executed successfully")
+                    except Exception as e:
+                        logger.error(f"❌ Error calling on_progress callback: {type(e).__name__}: {e}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    logger.warning("⚠️ on_progress callback is None - not registered!")
             
             self._check_and_execute_signal()
             
@@ -259,11 +439,15 @@ class TradingManager:
             if self.on_error:
                 self.on_error(f"Gagal open posisi (retry {self.buy_retry_count}/{self.MAX_BUY_RETRY}): {error_msg}")
             
-            # Delay 5-10 detik sebelum retry (acak untuk hindari pattern)
+            # Exponential backoff delay with jitter
             import random
-            delay = random.uniform(5, 10)
-            logger.info(f"⏳ Waiting {delay:.1f}s before retry...")
-            time_module.sleep(delay)
+            base_delay = self.RETRY_BASE_DELAY * (2 ** (self.buy_retry_count - 1))
+            delay = min(base_delay, self.RETRY_MAX_DELAY)
+            jitter = random.uniform(0, delay * 0.3)
+            final_delay = delay + jitter
+            
+            logger.info(f"⏳ Exponential backoff: waiting {final_delay:.1f}s before retry (base: {base_delay:.1f}s)...")
+            time_module.sleep(final_delay)
             
             # Reset state untuk coba lagi
             self.state = TradingState.RUNNING
@@ -359,6 +543,16 @@ class TradingManager:
         )
         self.trade_history.append(result)
         
+        # Track analytics
+        rsi_value = self.strategy.last_indicators.rsi if hasattr(self.strategy, 'last_indicators') else 50.0
+        self.analytics.add_trade(
+            is_win=is_win,
+            profit=profit,
+            stake=self.current_stake,
+            rsi_value=rsi_value,
+            current_balance=self.stats.current_balance
+        )
+        
         # Log trade ke CSV journal
         self._log_trade_to_journal(result)
         
@@ -372,27 +566,47 @@ class TradingManager:
             self._complete_session()
             return
         
-        # Martingale logic
+        # Adaptive Martingale logic
         if is_win:
-            # Reset ke base stake
             self.current_stake = self.base_stake
             next_stake = self.base_stake
+            
+            if self.in_martingale_sequence:
+                self.analytics.record_martingale_result(recovered=True)
+                logger.info(f"✅ Martingale recovery successful after {self.martingale_level} levels")
+            
+            self.martingale_level = 0
+            self.in_martingale_sequence = False
         else:
-            # Increase stake (Martingale)
-            next_stake = round(self.current_stake * self.MARTINGALE_MULTIPLIER, 2)
+            self.in_martingale_sequence = True
+            self.martingale_level += 1
             
-            # RISK CHECK: Cek apakah Martingale stake melebihi balance
-            current_balance = self.ws.get_balance()
-            if next_stake > current_balance:
-                logger.warning(f"⚠️ Martingale stake ${next_stake:.2f} melebihi balance ${current_balance:.2f}")
+            if self.martingale_level >= self.MAX_MARTINGALE_LEVEL:
+                logger.warning(f"⚠️ Max martingale level ({self.MAX_MARTINGALE_LEVEL}) reached")
+                self.analytics.record_martingale_result(recovered=False)
                 if self.on_error:
-                    self.on_error(f"Trading dihentikan! Balance tidak cukup untuk Martingale (${next_stake:.2f} > ${current_balance:.2f})")
-                self.is_processing_signal = False
-                self.signal_processing_start_time = 0.0
-                self._complete_session()
-                return
-            
-            self.current_stake = next_stake
+                    self.on_error(f"Max martingale level {self.MAX_MARTINGALE_LEVEL} tercapai. Resetting stake.")
+                self.current_stake = self.base_stake
+                next_stake = self.base_stake
+                self.martingale_level = 0
+                self.in_martingale_sequence = False
+            else:
+                multiplier = self._get_adaptive_martingale_multiplier()
+                next_stake = round(self.current_stake * multiplier, 2)
+                
+                current_balance = self.ws.get_balance()
+                if next_stake > current_balance:
+                    logger.warning(f"⚠️ Martingale stake ${next_stake:.2f} melebihi balance ${current_balance:.2f}")
+                    if self.on_error:
+                        self.on_error(f"Trading dihentikan! Balance tidak cukup untuk Martingale (${next_stake:.2f} > ${current_balance:.2f})")
+                    self.analytics.record_martingale_result(recovered=False)
+                    self.is_processing_signal = False
+                    self.signal_processing_start_time = 0.0
+                    self._complete_session()
+                    return
+                
+                self.current_stake = next_stake
+                logger.info(f"📊 Martingale Level {self.martingale_level}: stake ${next_stake:.2f} (multiplier: {multiplier}x)")
             
         # Notify via callback
         if self.on_trade_closed:
@@ -427,6 +641,19 @@ class TradingManager:
         
         # Save session summary to file
         self._save_session_summary()
+        
+        # Export analytics to JSON
+        try:
+            analytics_file = os.path.join(
+                LOGS_DIR, 
+                f"analytics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            )
+            self.analytics.export_to_json(analytics_file)
+        except Exception as e:
+            logger.error(f"Failed to export analytics: {e}")
+        
+        # Log analytics summary
+        logger.info(self.analytics.get_summary())
         
         if self.on_session_complete:
             self.on_session_complete(
@@ -612,11 +839,10 @@ class TradingManager:
             return
         
         # RISK CHECK 4: Cek apakah stake berikutnya (Martingale) melebihi balance
-        # Jika loss, stake berikutnya = current_stake * 2.1
-        projected_next_stake = self.current_stake * self.MARTINGALE_MULTIPLIER
+        multiplier = self._get_adaptive_martingale_multiplier()
+        projected_next_stake = self.current_stake * multiplier
         if projected_next_stake > current_balance:
-            logger.warning(f"⚠️ Balance tidak cukup untuk Martingale! Next stake: ${projected_next_stake:.2f}, Balance: ${current_balance:.2f}")
-            # Tetap lanjut trade, tapi log warning
+            logger.warning(f"⚠️ Balance mungkin tidak cukup untuk Martingale! Next stake: ${projected_next_stake:.2f}, Balance: ${current_balance:.2f}")
             
         # Eksekusi buy
         success = self.ws.buy_contract(
