@@ -65,12 +65,13 @@ Do not make changes to the file `Y`.
 - **Session Management**: Configurable target number of trades with auto-stop functionality.
 
 ### System Design Choices
-- **File Structure**: Modular Python files for entry point (`main.py`), strategy (`strategy.py`), WebSocket communication (`deriv_ws.py`), trading logic (`trading.py`), symbol configuration (`symbols.py`), and utility (`keep_alive.py`).
+- **File Structure**: Modular Python files for entry point (`main.py`), strategy (`strategy.py`), WebSocket communication (`deriv_ws.py`), trading logic (`trading.py`), symbol configuration (`symbols.py`), pair scanner (`pair_scanner.py`), dan user authentication (`user_auth.py`).
 - **Logging**: Dedicated `logs/` directory for trade journals, session summaries, analytics, and error logs.
 - **Security**: Deriv API tokens and Telegram bot tokens are stored as encrypted environment variables (Replit Secrets). WebSocket communication uses WSS for encryption.
+- **Startup (v2.8)**: Bot starts dengan async pattern dan delete_webhook untuk menghindari Telegram polling conflict. Tidak memerlukan Flask keep-alive server.
 
 ## External Dependencies
 - `python-telegram-bot`: For Telegram API interaction and bot functionality.
 - `websocket-client`: For real-time WebSocket communication with the Deriv API.
-- `flask`: Used for the `keep_alive.py` module to maintain the bot's uptime (for Replits with Always On feature).
 - `python-dotenv`: For managing environment variables, although Replit Secrets are primarily used.
+- `cryptography`: For encrypting user tokens securely (Fernet/AES-128).
