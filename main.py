@@ -42,6 +42,7 @@ from telegram.ext import (
 from deriv_ws import DerivWebSocket, AccountType
 from trading import TradingManager, TradingState
 from keep_alive import start_keep_alive
+from pair_scanner import PairScanner
 from symbols import (
     SUPPORTED_SYMBOLS,
     DEFAULT_SYMBOL,
@@ -65,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 deriv_ws: Optional[DerivWebSocket] = None
 trading_manager: Optional[TradingManager] = None
+pair_scanner: Optional[PairScanner] = None
 active_chat_id: Optional[int] = None
 chat_id_confirmed: bool = False
 shutdown_requested: bool = False
@@ -369,7 +371,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk semua inline button callbacks"""
-    global deriv_ws, trading_manager, active_chat_id, chat_id_confirmed
+    global deriv_ws, trading_manager, pair_scanner, active_chat_id, chat_id_confirmed
     
     query = update.callback_query
     if not query or not query.data:
@@ -419,11 +421,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_autotrade":
         trade_text = (
             "🚀 **AUTO TRADING**\n\n"
-            "Pilih symbol untuk trading:\n"
+            "Pilih opsi trading:\n"
         )
         
         keyboard = [
-            [InlineKeyboardButton("📊 Pilih Symbol", callback_data="select_symbol")],
+            [InlineKeyboardButton("🎯 Rekomendasi Saat Ini", callback_data="menu_recommendations")],
+            [InlineKeyboardButton("📊 Pilih Symbol Manual", callback_data="select_symbol")],
             [InlineKeyboardButton("⚡ Quick Start (R_100)", callback_data="quick_menu")],
             [InlineKeyboardButton("« Kembali", callback_data="menu_main")]
         ]
@@ -580,6 +583,151 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             trade_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif data == "menu_recommendations":
+        if not pair_scanner:
+            if deriv_ws and deriv_ws.is_ready():
+                pair_scanner = PairScanner(deriv_ws)
+                pair_scanner.start_scanning()
+                logger.info("✅ PairScanner initialized on-demand")
+            else:
+                await query.edit_message_text(
+                    "❌ Scanner belum siap. Koneksi belum terhubung.\n\n"
+                    "Coba reset koneksi di menu Akun.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Coba Lagi", callback_data="menu_recommendations")],
+                        [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+                    ])
+                )
+                return
+        
+        if not pair_scanner.is_scanning:
+            if deriv_ws and deriv_ws.is_ready():
+                pair_scanner.start_scanning()
+                logger.info("✅ PairScanner re-started")
+            
+        scanner_status = pair_scanner.get_scanner_status()
+        recommendations = pair_scanner.get_recommendations(top_n=5)
+        
+        if not recommendations:
+            if scanner_status['symbols_with_data'] == 0:
+                rec_text = (
+                    "🎯 **REKOMENDASI SAAT INI**\n\n"
+                    "⏳ **Mengumpulkan data...**\n\n"
+                    f"• Scanning {scanner_status['total_symbols']} pairs\n"
+                    f"• Data tersedia: {scanner_status['symbols_with_data']}\n"
+                    f"• Min ticks: {scanner_status['min_ticks_required']}\n\n"
+                    "Tunggu 30-60 detik untuk data cukup."
+                )
+            else:
+                rec_text = (
+                    "🎯 **REKOMENDASI SAAT INI**\n\n"
+                    "⚠️ **Tidak ada signal aktif**\n\n"
+                    f"• {scanner_status['symbols_with_data']} pairs sudah dianalisis\n"
+                    f"• {scanner_status['symbols_with_signal']} dengan signal\n\n"
+                    "Semua pair sedang SIDEWAYS. Tunggu atau pilih manual."
+                )
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data="menu_recommendations")],
+                [InlineKeyboardButton("📊 Pilih Manual", callback_data="select_symbol")],
+                [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+            ]
+        else:
+            rec_text = (
+                "🎯 **REKOMENDASI SAAT INI**\n\n"
+                "Pair dengan signal terbaik:\n\n"
+            )
+            
+            keyboard = []
+            for i, rec in enumerate(recommendations, 1):
+                signal_emoji = "🟢" if rec['signal'] == "CALL" else "🔴"
+                trend_emoji = "📈" if rec['trend_direction'] == "UP" else ("📉" if rec['trend_direction'] == "DOWN" else "➡️")
+                
+                rec_text += (
+                    f"**{i}. {rec['name']}** {signal_emoji}\n"
+                    f"   Signal: {rec['signal']} | Score: {rec['score']:.0f}/100\n"
+                    f"   RSI: {rec['rsi']:.1f} | ADX: {rec['adx']:.1f}\n"
+                    f"   Trend: {trend_emoji} {rec['trend_direction']}\n"
+                    f"   Conf: {rec['confidence']*100:.0f}%\n\n"
+                )
+                
+                btn_text = f"{signal_emoji} {rec['symbol']} ({rec['score']:.0f})"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"rec_trade~{rec['symbol']}")])
+            
+            keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="menu_recommendations")])
+            keyboard.append([InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")])
+        
+        await query.edit_message_text(
+            rec_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif data.startswith("rec_trade~"):
+        symbol = data[10:]
+        config = get_symbol_config(symbol)
+        
+        if not config:
+            await query.edit_message_text(
+                f"❌ Symbol {symbol} tidak ditemukan.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Kembali", callback_data="menu_recommendations")]
+                ])
+            )
+            return
+        
+        if not trading_manager:
+            await query.edit_message_text(
+                "❌ Trading manager belum siap. Tunggu beberapa detik...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"rec_trade~{symbol}")],
+                    [InlineKeyboardButton("« Kembali", callback_data="menu_recommendations")]
+                ])
+            )
+            return
+        
+        current_signal = "UNKNOWN"
+        current_score = 0
+        current_rsi = 50.0
+        current_adx = 0
+        if pair_scanner:
+            all_status = pair_scanner.get_all_pair_status()
+            for pair in all_status:
+                if pair['symbol'] == symbol:
+                    current_signal = pair['signal']
+                    current_score = pair['score']
+                    current_rsi = pair['rsi']
+                    current_adx = pair['adx']
+                    break
+        
+        signal_emoji = "🟢" if current_signal == "CALL" else ("🔴" if current_signal == "PUT" else "⚪")
+        
+        trade_setup = (
+            f"⚙️ **TRADING: {config.name}**\n\n"
+            f"• Symbol: `{symbol}`\n"
+            f"• Signal: {signal_emoji} **{current_signal}**\n"
+            f"• Score: {current_score:.0f}/100\n"
+            f"• RSI: {current_rsi:.1f} | ADX: {current_adx:.1f}\n"
+            f"• Durasi: 5 ticks\n\n"
+            "Pilih stake dan target:"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("$0.50 | 5x", callback_data=f"exec~{symbol}~5t~050~5"),
+                InlineKeyboardButton("$0.50 | 10x", callback_data=f"exec~{symbol}~5t~050~10")
+            ],
+            [
+                InlineKeyboardButton("$1 | 5x", callback_data=f"exec~{symbol}~5t~1~5"),
+                InlineKeyboardButton("$1 | ∞", callback_data=f"exec~{symbol}~5t~1~0")
+            ],
+            [InlineKeyboardButton("« Kembali", callback_data="menu_recommendations")]
+        ]
+        await query.edit_message_text(
+            trade_setup,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1080,7 +1228,7 @@ def shutdown_handler(signum, frame):
 
 def initialize_deriv():
     """Inisialisasi koneksi Deriv WebSocket dengan retry dan error handling"""
-    global deriv_ws, trading_manager
+    global deriv_ws, trading_manager, pair_scanner
     
     demo_token = os.environ.get("DERIV_TOKEN_DEMO", "")
     real_token = os.environ.get("DERIV_TOKEN_REAL", "")
@@ -1111,6 +1259,12 @@ def initialize_deriv():
                 logger.info("✅ Deriv WebSocket ready!")
                 trading_manager = TradingManager(deriv_ws)
                 
+                pair_scanner = PairScanner(deriv_ws)
+                if pair_scanner.start_scanning():
+                    logger.info("✅ Pair Scanner started successfully")
+                else:
+                    logger.warning("⚠️ Pair Scanner failed to start, will retry later")
+                
                 # Log account info
                 if deriv_ws.account_info:
                     logger.info(f"   Account: {deriv_ws.account_info.account_id}")
@@ -1129,6 +1283,9 @@ def initialize_deriv():
                 
                 # Tetap buat trading manager untuk retry nanti
                 trading_manager = TradingManager(deriv_ws)
+                
+                # Tetap buat pair_scanner meski belum ready
+                pair_scanner = PairScanner(deriv_ws)
                 return False
         else:
             logger.error("❌ Failed to connect to Deriv WebSocket")
