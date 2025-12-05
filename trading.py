@@ -88,6 +88,7 @@ class TradingManager:
     """
     Kelas utama untuk mengelola trading session.
     Menggabungkan strategi, eksekusi, dan money management.
+    Mendukung multiple trading pairs dengan validasi otomatis.
     """
     
     MARTINGALE_MULTIPLIER = 2.1

@@ -35,6 +35,15 @@ from telegram.ext import (
 from deriv_ws import DerivWebSocket, AccountType
 from trading import TradingManager, TradingState
 from keep_alive import start_keep_alive
+from symbols import (
+    SUPPORTED_SYMBOLS,
+    DEFAULT_SYMBOL,
+    MIN_STAKE_GLOBAL,
+    get_symbol_config,
+    get_short_term_symbols,
+    get_long_term_symbols,
+    get_symbol_list_text
+)
 
 load_dotenv()
 
@@ -131,7 +140,7 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk command /autotrade [stake] [durasi] [target]"""
+    """Handler untuk command /autotrade [stake] [durasi] [target] [symbol]"""
     global trading_manager
     if not update.message:
         return
@@ -142,17 +151,18 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     args = context.args if context.args else []
     
-    stake = 0.50
+    stake = MIN_STAKE_GLOBAL
     duration_str = "5t"  # 5 ticks untuk Volatility Index
     target_trades = 5
+    symbol = DEFAULT_SYMBOL
     
     if len(args) >= 1:
         try:
             stake = float(args[0])
-            if stake < 0.50:
-                stake = 0.50
+            if stake < MIN_STAKE_GLOBAL:
+                stake = MIN_STAKE_GLOBAL
                 await update.message.reply_text(
-                    "⚠️ Stake minimum adalah $0.50. Dikoreksi otomatis."
+                    f"⚠️ Stake minimum adalah ${MIN_STAKE_GLOBAL}. Dikoreksi otomatis."
                 )
         except ValueError:
             await update.message.reply_text("❌ Format stake tidak valid. Gunakan angka.")
@@ -167,14 +177,29 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             target_trades = 0
             
+    if len(args) >= 4:
+        input_symbol = args[3].upper()
+        if input_symbol in SUPPORTED_SYMBOLS:
+            symbol = input_symbol
+        else:
+            await update.message.reply_text(
+                f"⚠️ Symbol '{input_symbol}' tidak dikenal. Menggunakan default: {DEFAULT_SYMBOL}\n\n"
+                f"Symbol tersedia: {', '.join(SUPPORTED_SYMBOLS.keys())}"
+            )
+            
     duration, duration_unit = trading_manager.parse_duration(duration_str)
     
     config_msg = trading_manager.configure(
         stake=stake,
         duration=duration,
         duration_unit=duration_unit,
-        target_trades=target_trades
+        target_trades=target_trades,
+        symbol=symbol
     )
+    
+    if config_msg.startswith("❌"):
+        await update.message.reply_text(config_msg, parse_mode="Markdown")
+        return
     
     start_msg = trading_manager.start()
     
@@ -240,22 +265,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Cek saldo real-time\n"
         "• Switch antara Demo/Real\n\n"
         "**2️⃣ Mulai Trading**\n"
-        "Format: `/autotrade [stake] [durasi] [target]`\n\n"
+        "Format: `/autotrade [stake] [durasi] [target] [symbol]`\n\n"
         "Contoh:\n"
-        "• `/autotrade` - Default ($0.35, 5t, 5 trade)\n"
+        "• `/autotrade` - Default ($0.50, 5t, 5 trade, R_100)\n"
         "• `/autotrade 0.5` - Stake $0.5\n"
-        "• `/autotrade 1 1m 10` - $1, 1 menit, 10 trade\n"
-        "• `/autotrade 0.35 5t 0` - Unlimited\n\n"
+        "• `/autotrade 1 5t 10` - $1, 5 ticks, 10 trade\n"
+        "• `/autotrade 0.50 5t 0 R_50` - Unlimited, R_50\n\n"
         "**Format Durasi:**\n"
-        "• `5t` = 5 ticks\n"
+        "• `5t` = 5 ticks (untuk Synthetic)\n"
         "• `30s` = 30 detik\n"
-        "• `1m` = 1 menit\n\n"
-        "**3️⃣ Strategi RSI**\n"
+        "• `1m` = 1 menit\n"
+        "• `1d` = 1 hari (untuk XAUUSD)\n\n"
+        "**3️⃣ Symbol Tersedia**\n"
+        "Short-term (ticks): R_100, R_75, R_50, R_25, R_10\n"
+        "1-second: 1HZ100V, 1HZ75V, 1HZ50V\n"
+        "Long-term (hari): frxXAUUSD\n\n"
+        "**4️⃣ Strategi RSI**\n"
         "• BUY (Call): RSI < 30 (Oversold)\n"
-        "• SELL (Put): RSI > 70 (Overbought)\n"
-        "• WAIT: RSI 30-70 (Netral)\n\n"
-        "**4️⃣ Martingale**\n"
-        "• WIN: Stake kembali ke awal\n"
+        "• SELL (Put): RSI > 70 (Overbought)\n\n"
+        "**5️⃣ Martingale**\n"
+        "• WIN: Stake reset ke awal\n"
         "• LOSS: Stake x 2.1\n\n"
         "⚠️ *Trading memiliki risiko tinggi!*"
     )
@@ -305,24 +334,160 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_autotrade":
         trade_text = (
             "🚀 **AUTO TRADING**\n\n"
-            "Kirim command dengan format:\n"
-            "`/autotrade [stake] [durasi] [target]`\n\n"
-            "Contoh:\n"
-            "• `/autotrade 0.35 5t 10`\n"
-            "• `/autotrade 1 1m 0` (unlimited)\n\n"
-            "Atau gunakan quick start:"
+            "Pilih symbol untuk trading:\n"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 Pilih Symbol", callback_data="select_symbol")],
+            [InlineKeyboardButton("⚡ Quick Start (R_100)", callback_data="quick_menu")],
+            [InlineKeyboardButton("« Kembali", callback_data="menu_main")]
+        ]
+        await query.edit_message_text(
+            trade_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data == "select_symbol":
+        symbol_text = (
+            "📊 **PILIH TRADING SYMBOL**\n\n"
+            "**Synthetic (Short-term - Ticks):**\n"
+            "Cocok untuk auto trading cepat\n"
         )
         
         keyboard = [
             [
-                InlineKeyboardButton("$0.35 | 5t | 5x", callback_data="quick_035_5t_5"),
-                InlineKeyboardButton("$0.50 | 5t | 10x", callback_data="quick_050_5t_10")
+                InlineKeyboardButton("R_100 (Default)", callback_data="sym_R_100"),
+                InlineKeyboardButton("R_75", callback_data="sym_R_75")
             ],
             [
-                InlineKeyboardButton("$1 | 1m | 5x", callback_data="quick_1_1m_5"),
-                InlineKeyboardButton("$0.35 | 5t | ∞", callback_data="quick_035_5t_0")
+                InlineKeyboardButton("R_50", callback_data="sym_R_50"),
+                InlineKeyboardButton("R_25", callback_data="sym_R_25")
             ],
-            [InlineKeyboardButton("« Kembali", callback_data="menu_main")]
+            [
+                InlineKeyboardButton("1HZ100V (1s)", callback_data="sym_1HZ100V"),
+                InlineKeyboardButton("1HZ75V (1s)", callback_data="sym_1HZ75V")
+            ],
+            [InlineKeyboardButton("🥇 XAUUSD (HARIAN SAJA!)", callback_data="sym_frxXAUUSD")],
+            [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+        ]
+        await query.edit_message_text(
+            symbol_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data.startswith("sym_"):
+        symbol = data[4:]
+        config = get_symbol_config(symbol)
+        if config:
+            if config.supports_ticks:
+                duration_options = [
+                    [
+                        InlineKeyboardButton("5 ticks", callback_data=f"trade_{symbol}_5t"),
+                        InlineKeyboardButton("10 ticks", callback_data=f"trade_{symbol}_10t")
+                    ]
+                ]
+            else:
+                duration_options = [
+                    [
+                        InlineKeyboardButton("1 hari", callback_data=f"trade_{symbol}_1d"),
+                        InlineKeyboardButton("7 hari", callback_data=f"trade_{symbol}_7d")
+                    ]
+                ]
+            
+            symbol_info = (
+                f"📈 **{config.name}**\n\n"
+                f"• Symbol: `{config.symbol}`\n"
+                f"• Min Stake: ${config.min_stake}\n"
+                f"• Durasi: {config.duration_unit} ({config.description})\n\n"
+                "Pilih durasi trading:"
+            )
+            
+            keyboard = duration_options + [
+                [InlineKeyboardButton("« Kembali", callback_data="select_symbol")]
+            ]
+            await query.edit_message_text(
+                symbol_info,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+    elif data.startswith("trade_"):
+        parts = data.split("_")
+        if len(parts) >= 3:
+            symbol = parts[1]
+            duration_str = parts[2]
+            
+            trade_setup = (
+                f"⚙️ **SETUP TRADING**\n\n"
+                f"• Symbol: `{symbol}`\n"
+                f"• Durasi: {duration_str}\n\n"
+                "Pilih stake dan target:"
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("$0.50 | 5x", callback_data=f"exec_{symbol}_{duration_str}_050_5"),
+                    InlineKeyboardButton("$0.50 | 10x", callback_data=f"exec_{symbol}_{duration_str}_050_10")
+                ],
+                [
+                    InlineKeyboardButton("$1 | 5x", callback_data=f"exec_{symbol}_{duration_str}_1_5"),
+                    InlineKeyboardButton("$1 | ∞", callback_data=f"exec_{symbol}_{duration_str}_1_0")
+                ],
+                [InlineKeyboardButton("« Kembali", callback_data=f"sym_{symbol}")]
+            ]
+            await query.edit_message_text(
+                trade_setup,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+    elif data.startswith("exec_"):
+        parts = data.split("_")
+        if len(parts) >= 5 and trading_manager:
+            symbol = parts[1]
+            duration_str = parts[2]
+            stake_str = parts[3]
+            target_str = parts[4]
+            
+            stake = float(stake_str.replace("0", "0.")) if stake_str.startswith("0") else float(stake_str)
+            if stake_str == "050":
+                stake = 0.50
+            target = int(target_str)
+            
+            duration, duration_unit = trading_manager.parse_duration(duration_str)
+            config_msg = trading_manager.configure(
+                stake=stake,
+                duration=duration,
+                duration_unit=duration_unit,
+                target_trades=target,
+                symbol=symbol
+            )
+            
+            if config_msg.startswith("❌"):
+                await query.edit_message_text(config_msg, parse_mode="Markdown")
+                return
+                
+            result = trading_manager.start()
+            await query.edit_message_text(f"{config_msg}\n\n{result}", parse_mode="Markdown")
+            
+    elif data == "quick_menu":
+        trade_text = (
+            "⚡ **QUICK START (R_100)**\n\n"
+            "Trading cepat dengan Volatility 100:\n"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("$0.50 | 5t | 5x", callback_data="exec_R_100_5t_050_5"),
+                InlineKeyboardButton("$0.50 | 5t | 10x", callback_data="exec_R_100_5t_050_10")
+            ],
+            [
+                InlineKeyboardButton("$1 | 5t | 5x", callback_data="exec_R_100_5t_1_5"),
+                InlineKeyboardButton("$0.50 | 5t | ∞", callback_data="exec_R_100_5t_050_0")
+            ],
+            [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
         ]
         await query.edit_message_text(
             trade_text,
@@ -426,27 +591,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
             
-    elif data.startswith("quick_"):
-        parts = data.split("_")
-        if len(parts) == 4:
-            stake = float(parts[1].replace("0", "0.")) if parts[1].startswith("0") else float(parts[1])
-            if parts[1] == "035":
-                stake = 0.35
-            elif parts[1] == "050":
-                stake = 0.50
-            duration_str = parts[2]
-            target = int(parts[3])
-            
-            if trading_manager:
-                duration, duration_unit = trading_manager.parse_duration(duration_str)
-                trading_manager.configure(
-                    stake=stake,
-                    duration=duration,
-                    duration_unit=duration_unit,
-                    target_trades=target
-                )
-                result = trading_manager.start()
-                await query.edit_message_text(result, parse_mode="Markdown")
 
 
 async def send_telegram_message(app: Application, message: str):

@@ -29,10 +29,20 @@ Trading nyata berhasil terverifikasi pada 2025-12-05:
 | Symbol | Nama | Durasi Support | Keterangan |
 |--------|------|----------------|------------|
 | R_100 | Volatility 100 Index | 5t-10t (ticks) | **DEFAULT** - Ideal untuk short-term |
+| R_75 | Volatility 75 Index | 5t-10t (ticks) | Medium volatility |
 | R_50 | Volatility 50 Index | 5t-10t (ticks) | Short-term trading |
+| R_25 | Volatility 25 Index | 5t-10t (ticks) | Low volatility |
+| R_10 | Volatility 10 Index | 5t-10t (ticks) | Very low volatility |
+| 1HZ100V | Volatility 100 (1s) Index | 5t-10t (ticks) | 1-second ticks - very fast |
+| 1HZ75V | Volatility 75 (1s) Index | 5t-10t (ticks) | 1-second ticks |
+| 1HZ50V | Volatility 50 (1s) Index | 5t-10t (ticks) | 1-second ticks |
 | frxXAUUSD | Gold/USD | 1d-365d (HARI!) | Hanya untuk long-term |
 
 **PENTING**: XAUUSD hanya mendukung durasi HARIAN (min 1 hari), TIDAK bisa ticks/menit!
+
+**User bisa memilih symbol melalui:**
+1. Menu inline buttons di Telegram (Auto Trade > Pilih Symbol)
+2. Command: `/autotrade [stake] [durasi] [target] [symbol]`
 
 ## Struktur File
 
@@ -41,6 +51,7 @@ Trading nyata berhasil terverifikasi pada 2025-12-05:
 ├── strategy.py       # Modul strategi RSI
 ├── deriv_ws.py       # WebSocket client untuk Deriv API
 ├── trading.py        # Trading manager & Martingale
+├── symbols.py        # Konfigurasi trading pairs
 ├── keep_alive.py     # Flask server untuk keep-alive
 ├── test_real_trade.py # Script test trading nyata
 ├── check_contracts.py # Check available contracts
@@ -76,7 +87,7 @@ Bot memerlukan secrets berikut di Replit:
 |---------|-----------|
 | `/start` | Mulai bot dan tampilkan menu |
 | `/akun` | Kelola akun (saldo, switch demo/real) |
-| `/autotrade [stake] [durasi] [target]` | Mulai auto trading |
+| `/autotrade [stake] [durasi] [target] [symbol]` | Mulai auto trading |
 | `/stop` | Hentikan trading |
 | `/status` | Cek status bot |
 | `/help` | Panduan penggunaan |
@@ -84,19 +95,21 @@ Bot memerlukan secrets berikut di Replit:
 ### Format Auto Trade
 
 ```
-/autotrade [stake] [durasi] [target]
+/autotrade [stake] [durasi] [target] [symbol]
 ```
 
 Contoh:
-- `/autotrade` - Default ($0.50, 5t, 5 trade)
-- `/autotrade 0.5` - Stake $0.5
-- `/autotrade 1 5t 10` - $1, 5 ticks, 10 trade
-- `/autotrade 0.50 5t 0` - Unlimited
+- `/autotrade` - Default ($0.50, 5t, 5 trade, R_100)
+- `/autotrade 0.5` - Stake $0.5 dengan R_100
+- `/autotrade 1 5t 10` - $1, 5 ticks, 10 trade dengan R_100
+- `/autotrade 0.50 5t 0 R_50` - Unlimited dengan R_50
+- `/autotrade 1 1d 3 frxXAUUSD` - $1, 1 hari, 3 trade dengan Gold/USD
 
 Format Durasi:
-- `5t` = 5 ticks (DEFAULT - untuk Volatility Index)
+- `5t` = 5 ticks (DEFAULT - untuk Synthetic Index)
 - `30s` = 30 detik
-- `1m` = 1 menit (hanya untuk symbol tertentu)
+- `1m` = 1 menit
+- `1d` = 1 hari (untuk XAUUSD)
 
 ### Minimum Stake
 
@@ -158,6 +171,13 @@ python test_real_trade.py
    - Martingale working correctly
 
 4. **Added check_contracts.py**: Script to verify available contract types
+
+5. **Multi-Pair Trading Support**: User bisa memilih trading pair
+   - Tambah 9 symbol baru (R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V, frxXAUUSD)
+   - Menu inline untuk pemilihan symbol di Telegram
+   - Command /autotrade sekarang support parameter symbol
+   - Validasi durasi otomatis berdasarkan symbol
+   - Konfigurasi terpusat di symbols.py
 
 ## Disclaimer
 

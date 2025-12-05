@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from enum import Enum
 import websocket
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DEFAULT_SYMBOL = "R_100"
+MIN_STAKE = 0.50
 
 
 class AccountType(Enum):
@@ -351,13 +353,13 @@ class DerivWebSocket:
             
         return False
         
-    def get_contracts_for(self, symbol: str = "frxXAUUSD") -> bool:
+    def get_contracts_for(self, symbol: str = DEFAULT_SYMBOL) -> bool:
         """
         Query kontrak yang tersedia untuk symbol.
         Gunakan untuk mendapatkan durasi dan tipe kontrak yang valid.
         
         Args:
-            symbol: Symbol untuk query
+            symbol: Symbol untuk query (default: R_100)
             
         Returns:
             True jika request terkirim
@@ -369,12 +371,12 @@ class DerivWebSocket:
         }
         return self._send(payload)
         
-    def subscribe_ticks(self, symbol: str = "frxXAUUSD") -> bool:
+    def subscribe_ticks(self, symbol: str = DEFAULT_SYMBOL) -> bool:
         """
         Subscribe ke tick stream untuk symbol tertentu.
         
         Args:
-            symbol: Symbol yang ingin di-subscribe (default XAUUSD)
+            symbol: Symbol yang ingin di-subscribe (default: R_100)
             
         Returns:
             True jika request terkirim
@@ -413,7 +415,7 @@ class DerivWebSocket:
         self,
         contract_type: str,
         amount: float,
-        symbol: str = "frxXAUUSD",
+        symbol: str = DEFAULT_SYMBOL,
         duration: int = 5,
         duration_unit: str = "t"
     ) -> bool:
@@ -423,9 +425,9 @@ class DerivWebSocket:
         Args:
             contract_type: "CALL" atau "PUT"
             amount: Jumlah stake
-            symbol: Trading pair
+            symbol: Trading pair (default: R_100)
             duration: Durasi kontrak
-            duration_unit: "t" (ticks), "s" (seconds), "m" (minutes)
+            duration_unit: "t" (ticks), "s" (seconds), "m" (minutes), "d" (days)
             
         Returns:
             True jika request terkirim
