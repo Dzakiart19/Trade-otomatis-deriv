@@ -34,6 +34,10 @@ Do not make changes to the file `Y`.
     - Exponential backoff for retries.
     - Auto-Adjust Stake: Dynamically calculates and caps stake to a safe value based on projected Martingale exposure, preventing stops until balance falls below minimum stake.
 - **Session Analytics**: Tracks rolling win rate (last 20 trades), max drawdown, Martingale success rate, best performing RSI ranges, hourly P/L breakdown, and JSON export for analysis.
+- **Instant Data Preload (v2.5)**:
+    - **Historical Data Preload**: Saat bot diaktifkan, semua candle/tick data langsung dimuat dari Deriv API menggunakan `get_ticks_history()`.
+    - **No Wait Time**: Bot tidak perlu menunggu data terkumpul - langsung siap trading setelah preload selesai.
+    - **Fallback Mechanism**: Jika preload gagal, bot tetap berjalan dan mengumpulkan data dari live stream sebagai fallback.
 - **Error Handling & Stability**:
     - Improved WebSocket reconnection with network checks and subscription clearing.
     - Health checks with jitter and increased timeouts.
