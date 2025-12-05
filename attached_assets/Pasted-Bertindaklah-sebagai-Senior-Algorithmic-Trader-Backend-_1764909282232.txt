@@ -1,0 +1,84 @@
+Bertindaklah sebagai Senior Algorithmic Trader & Backend Engineer (Python Expert). Saya membutuhkan kode lengkap untuk Bot Telegram Auto Trading Deriv (Binary Options) yang "Production-Grade" untuk di-deploy di Replit.
+
+### TAMBAHAN STRATEGI & ANALISA TEKNIS (The Brain)
+Agar bot tidak trading asal-asalan (judi), tolong buatkan modul strategi menggunakan indikator RSI (Relative Strength Index) sederhana berdasarkan data Ticks.
+
+1. **Pengumpulan Data:**
+   - Bot harus menyimpan history 14-20 tick terakhir dalam list/array.
+
+2. **Logika RSI Sederhana (Manual Calculation):**
+   - Buatkan fungsi `calculate_rsi(prices)` tanpa library berat (cukup math dasar python) agar ringan.
+   - Hitung RSI periode 14 berdasarkan data tick yang masuk.
+
+3. **Rule Eksekusi (Signal):**
+   - **BUY (Call):** Jika RSI < 30 (Oversold/Harga sudah terlalu murah, potensi naik).
+   - **SELL (Put):** Jika RSI > 70 (Overbought/Harga sudah terlalu mahal, potensi turun).
+   - Jika RSI berada di antara 30-70, bot harus **WAIT** (jangan open posisi). Kirim status "⏳ Analyzing market..." di log console, jangan spam Telegram.
+
+4. **Filter Tren (Opsional):**
+   - Pastikan bot hanya mengeksekusi jika ada pergerakan harga yang signifikan (hindari market yang sedang flat/sideways).
+JANGAN berikan kode basic. Saya butuh struktur Modular, Asynchronous, dan Aman.
+
+
+### 1. TEKNOLOGI & INFRASTRUKTUR
+- **Language:** Python 3.10+
+- **Connection:** Gunakan `websocket-client` (Native/Raw) untuk kecepatan eksekusi tinggi (Low Latency). JANGAN pakai library wrapper standar.
+- **Async:** Gunakan `threading` atau `asyncio` agar bot bisa melakukan multitasking (Trading sambil merespon chat Telegram).
+- **Interface:** `python-telegram-bot` (v20+ ApplicationBuilder).
+- **Server:** `Flask` server ringan untuk endpoint "Keep-Alive" agar bot tidak mati di Replit.
+
+### 2. KONFIGURASI AKUN & KEAMANAN
+- **Multi-Account:** Support Token DEMO dan REAL.
+- **Storage:** Ambil token dari `os.environ` (Replit Secrets).
+- **Command `/akun`:** Menu interaktif (Inline Buttons) untuk:
+  1. Cek Saldo Real-time.
+  2. Switch Akun (Demo <-> Real).
+  3. Reset Session.
+
+### 3. PARAMETER TRADING (SANGAT DETAIL)
+Bot harus menerima instruksi trading dengan parameter dinamis.
+Command Input: `/autotrade [stake] [durasi] [jumlah_trade]`
+
+**Spesifikasi Logic:**
+1.  **Stake Terkecil (Micro Stake):**
+    - Default stake harus diset ke minimum yang diizinkan Deriv (biasanya **0.35 USD**).
+    - Jika user input stake di bawah 0.35, bot otomatis mengoreksi ke 0.35 atau menolak.
+2.  **Durasi Fleksibel:**
+    - Support input detik ("ticks" atau "s") dan menit ("m"). Contoh: `5t` (5 ticks), `1m` (1 menit).
+    - Konversi input user ke format API Deriv (`duration_unit` & `duration`).
+3.  **Target Jumlah Trade (Limiter):**
+    - Fitur Baru: User bisa set mau trade berapa kali.
+    - Logika: `If trade_count >= target_trade: STOP AUTO & Report Result`.
+    - Jika user isi "0" atau kosong, berarti mode "Unlimited" (jalan terus sampai dimatikan manual).
+4.  **Martingale Configurable:**
+    - Jika LOSS: Stake trade berikutnya = Stake x 2.1 (bisa diedit).
+    - Jika WIN: Stake kembali ke awal (0.35 atau sesuai input).
+
+### 4. CORE LOGIC TRADING (XAUUSD)
+- **Pair:** `frxXAUUSD` (Gold).
+- **Contract:** CALL (Rise) / PUT (Fall).
+- **Strategi Entry (Tick Analysis):**
+  - Implementasikan logika "Tick Trend Follower":
+    - Simpan 5 tick terakhir.
+    - Jika 3 tick terakhir naik berturut-turut -> BUY (Call).
+    - Jika 3 tick terakhir turun berturut-turut -> SELL (Put).
+- **Execution Flow (PENTING):**
+  - Bot tidak boleh menggunakan `time.sleep()` untuk menunggu hasil.
+  - Bot harus **Subscribe** ke `proposal_open_contract` segera setelah buy.
+  - Bot harus mendeteksi status `sold` secara real-time via WebSocket stream untuk tahu Win/Loss detik itu juga.
+
+### 5. FORMAT PESAN TELEGRAM (UX)
+Buat pesan yang informatif dan rapi:
+- **Saat Start:** "🚀 **AUTO STARTED** | Target: 5 Trade | Stake: $0.35"
+- **Saat Open Posisi:** "⏳ Entry: CALL | Spot: 2024.50"
+- **Saat Selesai (Real-time):**
+  - "✅ **WIN** (Trade 1/5) | Profit: +$0.31 | Saldo: $100.31"
+  - "❌ **LOSS** (Trade 1/5) | Loss: -$0.35 | Saldo: $99.65 | Next Stake: $0.74 (Martingale)"
+- **Saat Target Tercapai:** "🏁 **SESSION DONE** | Total Profit: +$1.50 | Bot Berhenti."
+
+### 6. STRUKTUR FILE
+1. `main.py`: Logic utama (WebSocket Class + Telegram Handler).
+2. `keep_alive.py`: Flask server.
+3. `requirements.txt`: List library (`python-telegram-bot`, `websocket-client`, `flask`, `python-dotenv`).
+
+Tolong tuliskan kodenya dengan **Comment Bahasa Indonesia** yang jelas. Pastikan Error Handling (Reconnect jika disconnect) terpasang dengan baik.
