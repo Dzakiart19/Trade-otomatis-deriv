@@ -1,0 +1,54 @@
+Ada 2 bug kritis yang perlu diperbaiki di bot trading Deriv:
+
+BUG 1: Notifikasi Telegram tidak terkirim
+- Error: "There is no current event loop in thread 'Thread-2 (run_forever)'"
+- Lokasi: di deriv_ws.py fungsi _on_contract_update() dan _on_buy_response()
+- Penyebab: WebSocket berjalan di thread terpisah, tidak bisa langsung panggil asyncio dari main.py
+- Solusi: Gunakan asyncio.run_coroutine_threadsafe() dengan proper event loop handling
+
+BUG 2: Tidak ada feedback saat mengumpulkan data tick
+- User tidak tahu apakah bot stuck atau sedang analisis
+- Perlu kirim update progress setiap 5 tick sekali via Telegram
+- Format: "📊 Menganalisis market... (14/15 tick) | RSI: calculating..."
+
+ATURAN PERBAIKAN:
+1. JANGAN ubah logika strategi di strategy.py (RSI, Martingale sudah bagus)
+2. JANGAN ubah struktur TradingManager di trading.py
+3. HANYA perbaiki:
+   - Event loop handling di main.py setup_trading_callbacks()
+   - Tambah progress notification di trading.py _on_tick()
+   - Fix asyncio.run_coroutine_threadsafe() di semua callback
+
+KODE YANG HARUS DIPERBAIKI:
+
+1. Di main.py, fungsi setup_trading_callbacks():
+   - Simpan event loop: `loop = asyncio.get_running_loop()`
+   - Gunakan loop ini di semua callback dengan asyncio.run_coroutine_threadsafe()
+
+2. Di trading.py, fungsi _on_tick():
+   - Tambah counter: self.tick_count
+   - Setiap 5 tick, kirim progress via callback baru: self.on_progress
+   - Format: f"📊 Tick {tick_count} | RSI: {rsi} | Waiting for signal..."
+
+3. Di main.py, tambah callback baru on_progress:
+   - Kirim update real-time ke Telegram
+   - Gunakan bot.edit_message_text() untuk update pesan yang sama (tidak spam)
+
+JANGAN UBAH:
+- Struktur class TradingManager
+- Logika RSI di strategy.py
+- Martingale multiplier (2.1)
+- WebSocket connection logic
+- Symbol configuration
+
+FOKUS HANYA PADA:
+- Fix event loop threading issue
+- Tambah progress notification
+- Improve user experience dengan real-time updates
+
+Target hasil: User bisa lihat progress real-time seperti:
+"📊 Menganalisis market... (12/15 tick)
+RSI: 45.2 | Trend: SIDEWAYS
+⏳ Menunggu sinyal trading..."
+
+Dan notifikasi WIN/LOSS muncul instant tanpa error.
