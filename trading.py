@@ -30,10 +30,17 @@ from symbols import (
     validate_duration_for_symbol,
     get_symbol_list_text
 )
+import csv
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Trade journal directory
+LOGS_DIR = "logs"
+if not os.path.exists(LOGS_DIR):
+    os.makedirs(LOGS_DIR)
 
 
 class TradingState(Enum):
@@ -93,6 +100,14 @@ class TradingManager:
     
     MARTINGALE_MULTIPLIER = 2.1
     
+    # Risk Management Constants
+    MAX_LOSS_PERCENT = 0.20  # 20% dari balance awal
+    MAX_CONSECUTIVE_LOSSES = 5  # Auto stop setelah 5 loss berturut
+    TRADE_COOLDOWN_SECONDS = 2.0  # Cooldown minimal antar trade
+    MAX_BUY_RETRY = 3  # Max retry untuk buy contract
+    MAX_DAILY_LOSS = 50.0  # Max daily loss dalam USD
+    SIGNAL_PROCESSING_TIMEOUT = 120.0  # Timeout untuk processing signal (detik)
+    
     def __init__(self, deriv_ws: DerivWebSocket):
         """
         Inisialisasi Trading Manager.
@@ -116,6 +131,17 @@ class TradingManager:
         self.current_contract_id: Optional[str] = None
         self.current_trade_type: Optional[str] = None
         self.entry_price: float = 0.0
+        
+        # ANTI-DOUBLE BUY: Flag untuk mencegah eksekusi concurrent
+        self.is_processing_signal: bool = False
+        self.last_trade_time: float = 0.0
+        self.buy_retry_count: int = 0
+        self.signal_processing_start_time: float = 0.0  # Untuk timeout detection
+        
+        # Risk Management
+        self.consecutive_losses: int = 0
+        self.session_start_date: str = ""
+        self.daily_loss: float = 0.0
         
         # Statistics
         self.stats = SessionStats()
@@ -148,12 +174,38 @@ class TradingManager:
         Handler untuk setiap tick yang masuk.
         Menambahkan ke strategy dan mengecek signal.
         """
+        import time as time_module
+        
         # Tambahkan tick ke strategy
         self.strategy.add_tick(price)
         
         # Jika sedang dalam posisi, tidak perlu analisis
         if self.state == TradingState.WAITING_RESULT:
             return
+            
+        # ANTI-DOUBLE BUY: Jika sedang processing signal, check timeout
+        current_time = time_module.time()
+        if self.is_processing_signal:
+            # Check for timeout - if signal processing takes too long, reset
+            if self.signal_processing_start_time > 0:
+                elapsed = current_time - self.signal_processing_start_time
+                if elapsed > self.SIGNAL_PROCESSING_TIMEOUT:
+                    logger.warning(f"⚠️ Signal processing timeout after {elapsed:.1f}s. Resetting flags.")
+                    self._log_error(f"Signal processing timeout after {elapsed:.1f}s")
+                    self._reset_processing_state()
+                else:
+                    logger.debug(f"Skipping tick - signal processing ({elapsed:.1f}s/{self.SIGNAL_PROCESSING_TIMEOUT}s)")
+                    return
+            else:
+                logger.debug("Skipping tick - signal still being processed")
+                return
+            
+        # COOLDOWN CHECK: Cek apakah sudah melewati cooldown time
+        if self.last_trade_time > 0:
+            time_since_last_trade = current_time - self.last_trade_time
+            if time_since_last_trade < self.TRADE_COOLDOWN_SECONDS:
+                logger.debug(f"Cooldown active: {self.TRADE_COOLDOWN_SECONDS - time_since_last_trade:.1f}s remaining")
+                return
             
         # Jika auto trading aktif, analisis signal
         if self.state == TradingState.RUNNING:
@@ -162,34 +214,70 @@ class TradingManager:
             stats = self.strategy.get_stats()
             current_tick_count = stats['tick_count']
             
-            if self.tick_count % self.progress_interval == 0 and current_tick_count <= self.required_ticks:
-                if self.on_progress:
-                    rsi_value = stats['rsi'] if current_tick_count >= self.required_ticks else 0
-                    trend = stats['trend']
-                    self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
+            # Progress notification - kirim saat collecting data
+            if current_tick_count <= self.required_ticks:
+                if self.tick_count % self.progress_interval == 0:
+                    if self.on_progress:
+                        rsi_value = stats['rsi'] if current_tick_count >= self.required_ticks else 0
+                        trend = stats['trend']
+                        logger.info(f"📊 Progress: {current_tick_count}/{self.required_ticks} ticks | RSI: {rsi_value}")
+                        try:
+                            self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
+                        except Exception as e:
+                            logger.error(f"Error calling on_progress callback: {e}")
             
             self._check_and_execute_signal()
             
     def _on_buy_response(self, data: dict):
         """Handler untuk response buy contract"""
+        import time as time_module
+        
         if "error" in data:
             error_msg = data["error"].get("message", "Unknown error")
-            logger.error(f"❌ Buy failed: {error_msg}")
+            error_code = data["error"].get("code", "")
+            logger.error(f"❌ Buy failed [{error_code}]: {error_msg}")
+            
+            # Log error ke file
+            self._log_error(f"Buy Error [{error_code}]: {error_msg}")
+            
+            # Reset processing flags
+            self.is_processing_signal = False
+            self.signal_processing_start_time = 0.0
+            
+            # Increment retry counter
+            self.buy_retry_count += 1
+            
+            if self.buy_retry_count >= self.MAX_BUY_RETRY:
+                # Max retry tercapai, stop trading
+                if self.on_error:
+                    self.on_error(f"Trading dihentikan setelah {self.MAX_BUY_RETRY}x gagal. Error: {error_msg}")
+                self.state = TradingState.STOPPED
+                self.buy_retry_count = 0
+                logger.error(f"❌ Max buy retry reached ({self.MAX_BUY_RETRY}x). Trading stopped.")
+                return
             
             if self.on_error:
-                self.on_error(f"Gagal open posisi: {error_msg}")
+                self.on_error(f"Gagal open posisi (retry {self.buy_retry_count}/{self.MAX_BUY_RETRY}): {error_msg}")
             
-            # Cooldown sebelum retry untuk hindari spam
-            import time
-            time.sleep(5)
+            # Delay 5-10 detik sebelum retry (acak untuk hindari pattern)
+            import random
+            delay = random.uniform(5, 10)
+            logger.info(f"⏳ Waiting {delay:.1f}s before retry...")
+            time_module.sleep(delay)
             
             # Reset state untuk coba lagi
             self.state = TradingState.RUNNING
             return
             
+        # SUCCESS: Reset retry counter
+        self.buy_retry_count = 0
+        
         buy_info = data.get("buy", {})
         self.current_contract_id = str(buy_info.get("contract_id", ""))
         self.entry_price = float(buy_info.get("buy_price", 0))
+        
+        # Update last trade time untuk cooldown
+        self.last_trade_time = time_module.time()
         
         # Subscribe ke contract updates
         if self.current_contract_id:
@@ -251,8 +339,11 @@ class TradingManager:
         self.stats.total_trades += 1
         if is_win:
             self.stats.wins += 1
+            self.consecutive_losses = 0  # Reset consecutive losses on win
         else:
             self.stats.losses += 1
+            self.consecutive_losses += 1  # Increment consecutive losses
+            self.daily_loss += abs(profit)  # Track daily loss
         self.stats.total_profit += profit
         
         # Simpan hasil trade
@@ -268,6 +359,19 @@ class TradingManager:
         )
         self.trade_history.append(result)
         
+        # Log trade ke CSV journal
+        self._log_trade_to_journal(result)
+        
+        # RISK CHECK: Cek consecutive losses
+        if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+            logger.warning(f"⚠️ Max consecutive losses reached: {self.consecutive_losses}")
+            if self.on_error:
+                self.on_error(f"Trading dihentikan! {self.consecutive_losses}x loss berturut-turut.")
+            self.is_processing_signal = False
+            self.signal_processing_start_time = 0.0
+            self._complete_session()
+            return
+        
         # Martingale logic
         if is_win:
             # Reset ke base stake
@@ -276,6 +380,18 @@ class TradingManager:
         else:
             # Increase stake (Martingale)
             next_stake = round(self.current_stake * self.MARTINGALE_MULTIPLIER, 2)
+            
+            # RISK CHECK: Cek apakah Martingale stake melebihi balance
+            current_balance = self.ws.get_balance()
+            if next_stake > current_balance:
+                logger.warning(f"⚠️ Martingale stake ${next_stake:.2f} melebihi balance ${current_balance:.2f}")
+                if self.on_error:
+                    self.on_error(f"Trading dihentikan! Balance tidak cukup untuk Martingale (${next_stake:.2f} > ${current_balance:.2f})")
+                self.is_processing_signal = False
+                self.signal_processing_start_time = 0.0
+                self._complete_session()
+                return
+            
             self.current_stake = next_stake
             
         # Notify via callback
@@ -289,6 +405,10 @@ class TradingManager:
                 next_stake
             )
             
+        # Reset processing flags SEBELUM cek target
+        self.is_processing_signal = False
+        self.signal_processing_start_time = 0.0
+            
         # Cek apakah target tercapai
         if self.target_trades > 0 and self.stats.total_trades >= self.target_trades:
             self._complete_session()
@@ -301,8 +421,12 @@ class TradingManager:
     def _complete_session(self):
         """Handle ketika session selesai (target tercapai)"""
         self.state = TradingState.STOPPED
+        self.is_processing_signal = False
         
         logger.info(f"🏁 Session complete! Total profit: ${self.stats.total_profit:.2f}")
+        
+        # Save session summary to file
+        self._save_session_summary()
         
         if self.on_session_complete:
             self.on_session_complete(
@@ -312,13 +436,110 @@ class TradingManager:
                 self.stats.total_profit,
                 self.stats.win_rate
             )
+    
+    def _reset_processing_state(self):
+        """Reset semua flags dan state untuk mencegah deadlock"""
+        self.is_processing_signal = False
+        self.signal_processing_start_time = 0.0
+        if self.state == TradingState.WAITING_RESULT:
+            self.state = TradingState.RUNNING
+        self.current_contract_id = None
+        self.current_trade_type = None
+        logger.info("🔄 Processing state has been reset")
+    
+    def _log_error(self, error_msg: str):
+        """Log error ke file terpisah untuk troubleshooting"""
+        try:
+            error_file = os.path.join(LOGS_DIR, "errors.log")
+            with open(error_file, "a", encoding="utf-8") as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{timestamp}] {error_msg}\n")
+        except Exception as e:
+            logger.error(f"Failed to write error log: {e}")
+    
+    def _log_trade_to_journal(self, trade: TradeResult):
+        """Log trade ke CSV journal untuk analisis"""
+        try:
+            journal_file = os.path.join(LOGS_DIR, f"trades_{datetime.now().strftime('%Y%m%d')}.csv")
+            file_exists = os.path.exists(journal_file)
+            
+            with open(journal_file, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                
+                # Write header jika file baru
+                if not file_exists:
+                    writer.writerow([
+                        "timestamp", "trade_number", "symbol", "type", 
+                        "entry_price", "exit_price", "stake", "payout", 
+                        "profit", "is_win", "rsi", "trend"
+                    ])
+                
+                # Get current RSI and trend
+                stats = self.strategy.get_stats()
+                
+                # Write trade data
+                writer.writerow([
+                    trade.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    trade.trade_number,
+                    self.symbol,
+                    trade.contract_type,
+                    trade.entry_price,
+                    trade.exit_price,
+                    trade.stake,
+                    trade.payout,
+                    trade.profit,
+                    "WIN" if trade.is_win else "LOSS",
+                    stats.get("rsi", 0),
+                    stats.get("trend", "N/A")
+                ])
+                
+            logger.info(f"📝 Trade logged to journal: {journal_file}")
+        except Exception as e:
+            logger.error(f"Failed to log trade to journal: {e}")
+    
+    def _save_session_summary(self):
+        """Simpan ringkasan session ke file"""
+        try:
+            summary_file = os.path.join(LOGS_DIR, f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write("=" * 50 + "\n")
+                f.write("SESSION SUMMARY\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Symbol: {self.symbol}\n")
+                f.write(f"Base Stake: ${self.base_stake}\n\n")
+                f.write("STATISTICS:\n")
+                f.write(f"  Total Trades: {self.stats.total_trades}\n")
+                f.write(f"  Wins: {self.stats.wins}\n")
+                f.write(f"  Losses: {self.stats.losses}\n")
+                f.write(f"  Win Rate: {self.stats.win_rate:.1f}%\n\n")
+                f.write("BALANCE:\n")
+                f.write(f"  Starting: ${self.stats.starting_balance:.2f}\n")
+                f.write(f"  Ending: ${self.stats.current_balance:.2f}\n")
+                f.write(f"  Highest: ${self.stats.highest_balance:.2f}\n")
+                f.write(f"  Lowest: ${self.stats.lowest_balance:.2f}\n")
+                f.write(f"  Net P/L: ${self.stats.total_profit:+.2f}\n\n")
+                f.write("RISK METRICS:\n")
+                f.write(f"  Max Consecutive Losses: {self.consecutive_losses}\n")
+                f.write(f"  Daily Loss: ${self.daily_loss:.2f}\n")
+                f.write("=" * 50 + "\n")
+                
+            logger.info(f"📊 Session summary saved to: {summary_file}")
+        except Exception as e:
+            logger.error(f"Failed to save session summary: {e}")
             
     def _check_and_execute_signal(self):
         """
         Cek signal dari strategi dan eksekusi jika ada.
         Dipanggil setiap tick baru masuk.
         """
+        # ANTI-DOUBLE BUY: Double check state dan processing flag
         if self.state != TradingState.RUNNING:
+            return
+            
+        if self.is_processing_signal:
+            logger.debug("Signal processing already in progress, skipping...")
             return
             
         # Dapatkan analisis dari strategy
@@ -328,7 +549,11 @@ class TradingManager:
             # Tidak ada signal, lanjut menunggu
             return
             
-        # Ada signal! Eksekusi trade
+        # Ada signal! Set flag processing SEBELUM eksekusi
+        import time as time_module
+        self.is_processing_signal = True
+        self.signal_processing_start_time = time_module.time()
+        
         contract_type = analysis.signal.value  # "CALL" atau "PUT"
         
         logger.info(f"📊 Signal: {contract_type} | RSI: {analysis.rsi_value} | "
@@ -343,6 +568,7 @@ class TradingManager:
         Args:
             contract_type: "CALL" atau "PUT"
         """
+        # Set state SEBELUM buy untuk mencegah race condition
         self.state = TradingState.WAITING_RESULT
         self.current_trade_type = contract_type
         
@@ -351,13 +577,46 @@ class TradingManager:
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         if self.current_stake < min_stake:
             self.current_stake = min_stake
-            
-        # Cek balance cukup
-        if self.current_stake > self.ws.get_balance():
+        
+        current_balance = self.ws.get_balance()
+        
+        # RISK CHECK 1: Cek balance cukup
+        if self.current_stake > current_balance:
             if self.on_error:
-                self.on_error(f"Balance tidak cukup! Stake: ${self.current_stake}, Balance: ${self.ws.get_balance():.2f}")
+                self.on_error(f"Balance tidak cukup! Stake: ${self.current_stake}, Balance: ${current_balance:.2f}")
             self.state = TradingState.STOPPED
+            self.is_processing_signal = False
             return
+        
+        # RISK CHECK 2: Cek max loss limit (20% dari balance awal)
+        if self.stats.starting_balance > 0:
+            max_loss = self.stats.starting_balance * self.MAX_LOSS_PERCENT
+            current_loss = self.stats.starting_balance - current_balance
+            if current_loss >= max_loss:
+                logger.warning(f"⚠️ Max loss limit reached! Loss: ${current_loss:.2f} >= ${max_loss:.2f}")
+                if self.on_error:
+                    self.on_error(f"Trading dihentikan! Max loss {self.MAX_LOSS_PERCENT*100:.0f}% tercapai. Loss: ${current_loss:.2f}")
+                self.is_processing_signal = False
+                self.signal_processing_start_time = 0.0
+                self._complete_session()
+                return
+        
+        # RISK CHECK 3: Cek daily loss limit
+        if self.daily_loss >= self.MAX_DAILY_LOSS:
+            logger.warning(f"⚠️ Daily loss limit reached! Daily loss: ${self.daily_loss:.2f} >= ${self.MAX_DAILY_LOSS:.2f}")
+            if self.on_error:
+                self.on_error(f"Trading dihentikan! Daily loss limit ${self.MAX_DAILY_LOSS:.2f} tercapai. Loss hari ini: ${self.daily_loss:.2f}")
+            self.is_processing_signal = False
+            self.signal_processing_start_time = 0.0
+            self._complete_session()
+            return
+        
+        # RISK CHECK 4: Cek apakah stake berikutnya (Martingale) melebihi balance
+        # Jika loss, stake berikutnya = current_stake * 2.1
+        projected_next_stake = self.current_stake * self.MARTINGALE_MULTIPLIER
+        if projected_next_stake > current_balance:
+            logger.warning(f"⚠️ Balance tidak cukup untuk Martingale! Next stake: ${projected_next_stake:.2f}, Balance: ${current_balance:.2f}")
+            # Tetap lanjut trade, tapi log warning
             
         # Eksekusi buy
         success = self.ws.buy_contract(
@@ -371,6 +630,7 @@ class TradingManager:
         if not success:
             logger.error("Failed to send buy request")
             self.state = TradingState.RUNNING
+            self.is_processing_signal = False
             
     def configure(
         self,
@@ -454,6 +714,19 @@ class TradingManager:
         # Reset tick counter untuk progress tracking
         self.tick_count = 0
         
+        # Reset risk management counters
+        self.consecutive_losses = 0
+        self.is_processing_signal = False
+        self.signal_processing_start_time = 0.0
+        self.last_trade_time = 0.0
+        self.buy_retry_count = 0
+        
+        # Reset daily loss jika tanggal berbeda
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.session_start_date != today:
+            self.session_start_date = today
+            self.daily_loss = 0.0
+        
         # Clear strategy history untuk fresh analysis
         self.strategy.clear_history()
         
@@ -488,6 +761,13 @@ class TradingManager:
         
         # Update state
         self.state = TradingState.STOPPED
+        
+        # Reset processing flags untuk mencegah deadlock saat restart
+        self.is_processing_signal = False
+        self.signal_processing_start_time = 0.0
+        
+        # Save session summary
+        self._save_session_summary()
         
         # Generate summary
         return self._generate_session_summary()
