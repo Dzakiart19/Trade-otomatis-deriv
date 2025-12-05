@@ -77,6 +77,7 @@ class DerivWebSocket:
     MAX_MISSED_PONGS = 3  # jumlah pong yang boleh terlewat sebelum reconnect (increased from 2)
     GRACE_PERIOD_SECONDS = 10  # grace period sebelum force reconnect
     PING_JITTER_MAX = 15  # maksimum jitter dalam detik untuk menghindari collision (increased from 5)
+    PENDING_REQUEST_TIMEOUT = 60.0  # timeout untuk cleanup pending requests (seconds)
     
     def __init__(self, demo_token: str, real_token: str):
         """
@@ -120,10 +121,10 @@ class DerivWebSocket:
         self.lock = threading.Lock()
         self.reconnect_count = 0
         self.auth_retry_count = 0
-        self._stop_health_check = False
+        self._stop_health_check_event = threading.Event()
         
-        # Request tracking
-        self.pending_requests: Dict[int, Any] = {}
+        # Request tracking - stores {data, timestamp} for timeout cleanup
+        self.pending_requests: Dict[int, Dict[str, Any]] = {}
         self.request_id = 0
         
         # Subscriptions - Multi-symbol support
@@ -214,7 +215,7 @@ class DerivWebSocket:
         self._update_connection_state("disconnected")
         
         # Stop health check
-        self._stop_health_check = True
+        self._stop_health_check_event.set()
         
         # Reset auth event
         self._auth_event.clear()
@@ -601,12 +602,12 @@ class DerivWebSocket:
         """
         import random
         
-        self._stop_health_check = False
+        self._stop_health_check_event.clear()
         self._missed_pong_count = 0
         self._grace_period_start = None
         
         def health_check_loop():
-            while not self._stop_health_check and self.is_connected:
+            while not self._stop_health_check_event.is_set() and self.is_connected:
                 try:
                     # Jitter 10-20 detik untuk avoid collision antar koneksi
                     jitter = random.uniform(10, 20)
@@ -824,7 +825,7 @@ class DerivWebSocket:
     def disconnect(self):
         """Tutup koneksi WebSocket"""
         logger.info("Disconnecting WebSocket...")
-        self._stop_health_check = True
+        self._stop_health_check_event.set()
         
         if self.ws:
             try:
