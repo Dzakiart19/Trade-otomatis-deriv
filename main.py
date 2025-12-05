@@ -41,7 +41,6 @@ from telegram.ext import (
 
 from deriv_ws import DerivWebSocket, AccountType
 from trading import TradingManager, TradingState
-from keep_alive import start_keep_alive
 from pair_scanner import PairScanner
 from symbols import (
     SUPPORTED_SYMBOLS,
@@ -1779,7 +1778,6 @@ def main():
             active_chat_id = loaded_chat_id
         logger.info(f"📂 Chat ID pre-loaded (requires /start to confirm): {active_chat_id}")
         
-    start_keep_alive()
     initialize_deriv()
     
     app = ApplicationBuilder().token(telegram_token).build()
@@ -1799,7 +1797,31 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, token_message_handler))
     
     logger.info("🤖 Bot is starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    import asyncio
+    
+    async def start_bot():
+        """Start bot dengan delete_webhook untuk menghindari conflict"""
+        await app.initialize()
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook deleted, starting polling...")
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+    
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
 
 
 if __name__ == "__main__":
