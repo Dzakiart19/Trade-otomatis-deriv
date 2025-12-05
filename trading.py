@@ -1,13 +1,13 @@
 """
 =============================================================
-TRADING MANAGER - Eksekusi & Money Management v2.1
+TRADING MANAGER - Eksekusi & Money Management v2.2
 =============================================================
 Modul ini menangani eksekusi trading, Martingale system,
 dan tracking hasil trading.
 
 Fitur:
 - Auto trading dengan target jumlah trade
-- Adaptive Martingale money management (dynamic multiplier)
+- Fixed 2.1x Recovery Martingale (simplified)
 - Real-time win/loss detection
 - Session statistics & analytics
 - ATR-based TP/SL monitoring
@@ -15,7 +15,6 @@ Fitur:
 
 Enhancement v2.0:
 - SessionAnalytics class for performance tracking
-- Adaptive martingale based on rolling win rate
 - Improved risk management
 
 Enhancement v2.1:
@@ -24,6 +23,11 @@ Enhancement v2.1:
 - Enhanced risk management with pre-flight validation
 - Session recovery mechanism (auto-save/restore)
 - Trade journal CSV validation with atomic writes
+
+Enhancement v2.2:
+- Simplified Recovery Martingale with fixed 2.1x multiplier
+- Clear recovery logging with cumulative loss tracking
+- Max 5 levels then STOP trading (no reset)
 =============================================================
 """
 
@@ -236,20 +240,15 @@ class TradingManager:
     Menggabungkan strategi, eksekusi, dan money management.
     Mendukung multiple trading pairs dengan validasi otomatis.
     
-    Features v2.0:
-    - Adaptive Martingale based on rolling win rate
+    Features v2.2:
+    - Fixed 2.1x Recovery Martingale (simplified)
     - Multi-indicator confirmation signals
     - ATR-based TP/SL monitoring
     - Real-time session analytics
     """
     
-    MARTINGALE_MULTIPLIER_AGGRESSIVE = 2.5
-    MARTINGALE_MULTIPLIER_NORMAL = 2.1
-    MARTINGALE_MULTIPLIER_CONSERVATIVE = 1.8
+    MARTINGALE_MULTIPLIER = 2.1
     MAX_MARTINGALE_LEVEL = 5
-    
-    WIN_RATE_AGGRESSIVE_THRESHOLD = 60.0
-    WIN_RATE_CONSERVATIVE_THRESHOLD = 40.0
     
     MAX_LOSS_PERCENT = 0.20
     MAX_CONSECUTIVE_LOSSES = 5
@@ -337,9 +336,10 @@ class TradingManager:
         self.trade_history: list[TradeResult] = []
         self.analytics = SessionAnalytics()
         
-        # Adaptive Martingale tracking
+        # Recovery Martingale tracking (simplified 2.1x multiplier)
         self.martingale_level: int = 0
         self.in_martingale_sequence: bool = False
+        self.cumulative_loss: float = 0.0  # Track total losses in current sequence for recovery logging
         
         # Callbacks untuk notifikasi Telegram
         self.on_trade_opened: Optional[Callable] = None
@@ -402,26 +402,14 @@ class TradingManager:
             logger.error(f"❌ Error pre-loading {self.symbol}: {e}")
             return False
         
-    def _get_adaptive_martingale_multiplier(self) -> float:
+    def _get_martingale_multiplier(self) -> float:
         """
-        Get adaptive martingale multiplier based on rolling win rate.
+        Get fixed martingale multiplier for Recovery Martingale system.
         
         Returns:
-            Multiplier value (1.8 conservative, 2.1 normal, 2.5 aggressive)
+            Fixed multiplier value of 2.1x
         """
-        rolling_wr = self.analytics.get_rolling_win_rate()
-        
-        if rolling_wr >= self.WIN_RATE_AGGRESSIVE_THRESHOLD:
-            multiplier = self.MARTINGALE_MULTIPLIER_AGGRESSIVE
-            logger.debug(f"📈 Adaptive Martingale: AGGRESSIVE (WR={rolling_wr:.1f}%)")
-        elif rolling_wr <= self.WIN_RATE_CONSERVATIVE_THRESHOLD:
-            multiplier = self.MARTINGALE_MULTIPLIER_CONSERVATIVE
-            logger.debug(f"📉 Adaptive Martingale: CONSERVATIVE (WR={rolling_wr:.1f}%)")
-        else:
-            multiplier = self.MARTINGALE_MULTIPLIER_NORMAL
-            logger.debug(f"⚖️ Adaptive Martingale: NORMAL (WR={rolling_wr:.1f}%)")
-            
-        return multiplier
+        return self.MARTINGALE_MULTIPLIER
         
     def _on_tick(self, price: float, symbol: str):
         """
@@ -805,32 +793,42 @@ class TradingManager:
             self._complete_session()
             return
         
-        # Adaptive Martingale logic
+        # Recovery Martingale logic (simplified 2.1x multiplier)
         if is_win:
-            self.current_stake = self.base_stake
             next_stake = self.base_stake
             
             if self.in_martingale_sequence:
                 self.analytics.record_martingale_result(recovered=True)
-                logger.info(f"✅ Martingale recovery successful after {self.martingale_level} levels")
+                recovered_amount = self.cumulative_loss
+                logger.info(f"🎉 RECOVERY SUCCESSFUL! Recovered ${recovered_amount:.2f} losses after {self.martingale_level} levels")
+                if self.on_error:
+                    self.on_error(f"🎉 Recovery successful! Recovered ${recovered_amount:.2f} losses after {self.martingale_level} levels")
             
+            self.current_stake = self.base_stake
             self.martingale_level = 0
             self.in_martingale_sequence = False
+            self.cumulative_loss = 0.0  # Reset cumulative loss on win
         else:
             self.in_martingale_sequence = True
             self.martingale_level += 1
+            self.cumulative_loss += abs(profit)  # Track cumulative loss for recovery logging
             
             if self.martingale_level >= self.MAX_MARTINGALE_LEVEL:
-                logger.warning(f"⚠️ Max martingale level ({self.MAX_MARTINGALE_LEVEL}) reached")
+                logger.error(f"❌ MAX MARTINGALE LEVEL ({self.MAX_MARTINGALE_LEVEL}) REACHED - STOPPING TRADING")
+                logger.error(f"   Total loss in sequence: ${self.cumulative_loss:.2f}")
                 self.analytics.record_martingale_result(recovered=False)
                 if self.on_error:
-                    self.on_error(f"Max martingale level {self.MAX_MARTINGALE_LEVEL} tercapai. Resetting stake.")
-                self.current_stake = self.base_stake
-                next_stake = self.base_stake
-                self.martingale_level = 0
-                self.in_martingale_sequence = False
+                    self.on_error(
+                        f"❌ MAX MARTINGALE LEVEL {self.MAX_MARTINGALE_LEVEL} REACHED!\n"
+                        f"Total loss: ${self.cumulative_loss:.2f}\n"
+                        f"Trading STOPPED untuk mencegah kerugian lebih besar."
+                    )
+                self.is_processing_signal = False
+                self.signal_processing_start_time = 0.0
+                self._complete_session()
+                return
             else:
-                multiplier = self._get_adaptive_martingale_multiplier()
+                multiplier = self._get_martingale_multiplier()
                 next_stake = round(self.current_stake * multiplier, 2)
                 
                 current_balance = self.ws.get_balance()
@@ -845,7 +843,11 @@ class TradingManager:
                     return
                 
                 self.current_stake = next_stake
-                logger.info(f"📊 Martingale Level {self.martingale_level}: stake ${next_stake:.2f} (multiplier: {multiplier}x)")
+                logger.info(
+                    f"📊 MARTINGALE Level {self.martingale_level}/{self.MAX_MARTINGALE_LEVEL}: "
+                    f"stake ${next_stake:.2f} (x{multiplier}) | "
+                    f"Cumulative Loss: ${self.cumulative_loss:.2f}"
+                )
             
         # Notify via callback
         if self.on_trade_closed:
