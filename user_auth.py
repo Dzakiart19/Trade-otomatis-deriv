@@ -329,21 +329,70 @@ class UserAuthManager:
 auth_manager = UserAuthManager()
 
 
+async def ensure_authenticated(update, send_alert: bool = True) -> bool:
+    """
+    Helper untuk mengecek autentikasi user.
+    Bekerja dengan commands (update.message) dan callbacks (update.callback_query).
+    
+    Args:
+        update: Telegram Update object
+        send_alert: Jika True, kirim pesan akses ditolak ke user
+        
+    Returns:
+        True jika user terautentikasi, False jika tidak
+    """
+    if not update.effective_user:
+        return False
+        
+    user_id = update.effective_user.id
+    
+    if auth_manager.is_authenticated(user_id):
+        return True
+    
+    if send_alert:
+        denied_text = (
+            "🔒 **AKSES DITOLAK**\n\n"
+            "Anda belum login. Gunakan /login untuk masuk dengan token Deriv Anda."
+        )
+        
+        if update.callback_query:
+            try:
+                await update.callback_query.answer("Anda belum login!", show_alert=True)
+                await update.callback_query.edit_message_text(
+                    denied_text,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send auth denial via callback: {e}")
+        elif update.message:
+            await update.message.reply_text(
+                denied_text,
+                parse_mode="Markdown"
+            )
+    
+    return False
+
+
 def require_auth(func):
     """Decorator untuk mengecek autentikasi sebelum menjalankan command"""
     async def wrapper(update, context, *args, **kwargs):
-        if not update.effective_user:
+        if not await ensure_authenticated(update):
             return
-            
-        user_id = update.effective_user.id
-        
-        if not auth_manager.is_authenticated(user_id):
-            await update.message.reply_text(
-                "🔒 **AKSES DITOLAK**\n\n"
-                "Anda belum login. Gunakan /login untuk masuk dengan token Deriv Anda.",
-                parse_mode="Markdown"
-            )
-            return
-            
         return await func(update, context, *args, **kwargs)
     return wrapper
+
+
+def require_auth_callback(func):
+    """Decorator untuk mengecek autentikasi pada callback query handlers"""
+    async def wrapper(update, context, *args, **kwargs):
+        if not await ensure_authenticated(update):
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+ALLOWED_CALLBACKS_WITHOUT_AUTH = {
+    "login_demo",
+    "login_real", 
+    "login_cancel",
+}

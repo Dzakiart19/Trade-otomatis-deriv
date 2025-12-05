@@ -52,7 +52,7 @@ from symbols import (
     get_long_term_symbols,
     get_symbol_list_text
 )
-from user_auth import auth_manager, UserAuthManager
+from user_auth import auth_manager, UserAuthManager, ensure_authenticated, ALLOWED_CALLBACKS_WITHOUT_AUTH
 
 USD_TO_IDR = 15800
 CHAT_ID_FILE = "logs/active_chat_id.txt"
@@ -119,37 +119,69 @@ def load_chat_id() -> Optional[int]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
     global active_chat_id, chat_id_confirmed
-    if not update.effective_chat or not update.message:
+    if not update.effective_chat or not update.message or not update.effective_user:
         return
+    
     with _chat_id_lock:
         active_chat_id = update.effective_chat.id
         chat_id_confirmed = True
-    save_chat_id(active_chat_id)
     
-    welcome_text = (
-        "🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
-        "Bot trading otomatis untuk Binary Options (Volatility Index).\n"
-        "Menggunakan Multi-Indicator Strategy + Adaptive Martingale.\n\n"
-        "📊 **Indicators:** RSI, EMA, MACD, Stochastic, ATR\n\n"
-        "📋 **Menu Utama:**\n"
-        "• /akun - Kelola akun (saldo, switch demo/real)\n"
-        "• /autotrade - Mulai auto trading\n"
-        "• /stop - Hentikan trading\n"
-        "• /status - Cek status bot\n"
-        "• /help - Panduan lengkap\n\n"
-        "⚠️ *Trading memiliki risiko. Gunakan dengan bijak.*"
-    )
+    if active_chat_id is not None:
+        save_chat_id(active_chat_id)
     
-    keyboard = [
-        [
-            InlineKeyboardButton("💰 Cek Akun", callback_data="menu_akun"),
-            InlineKeyboardButton("🚀 Auto Trade", callback_data="menu_autotrade")
-        ],
-        [
-            InlineKeyboardButton("📊 Status", callback_data="menu_status"),
-            InlineKeyboardButton("❓ Help", callback_data="menu_help")
+    user_id = update.effective_user.id
+    is_logged_in = auth_manager.is_authenticated(user_id)
+    
+    if is_logged_in:
+        user_info = auth_manager.get_user_info(user_id)
+        account_type = user_info['account_type'].upper() if user_info else "UNKNOWN"
+        account_emoji = "🎮" if account_type == "DEMO" else "💵"
+        
+        welcome_text = (
+            f"🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
+            f"Selamat datang kembali! {account_emoji}\n"
+            f"Akun: **{account_type}**\n\n"
+            f"📊 **Indicators:** RSI, EMA, MACD, Stochastic, ATR\n\n"
+            f"📋 **Menu Utama:**\n"
+            f"• /akun - Kelola akun (saldo, switch demo/real)\n"
+            f"• /autotrade - Mulai auto trading\n"
+            f"• /stop - Hentikan trading\n"
+            f"• /status - Cek status bot\n"
+            f"• /help - Panduan lengkap\n\n"
+            f"⚠️ *Trading memiliki risiko. Gunakan dengan bijak.*"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("💰 Cek Akun", callback_data="menu_akun"),
+                InlineKeyboardButton("🚀 Auto Trade", callback_data="menu_autotrade")
+            ],
+            [
+                InlineKeyboardButton("📊 Status", callback_data="menu_status"),
+                InlineKeyboardButton("❓ Help", callback_data="menu_help")
+            ],
+            [InlineKeyboardButton("👋 Logout", callback_data="confirm_logout")]
         ]
-    ]
+    else:
+        welcome_text = (
+            "🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
+            "Selamat datang! Bot ini adalah bot trading otomatis\n"
+            "untuk Binary Options (Volatility Index).\n\n"
+            "🔐 **Anda belum login**\n\n"
+            "Untuk menggunakan bot ini, Anda harus login terlebih dahulu\n"
+            "dengan token API Deriv Anda.\n\n"
+            "📍 **Cara Login:**\n"
+            "1. Klik tombol LOGIN di bawah\n"
+            "2. Pilih tipe akun (Demo/Real)\n"
+            "3. Kirim token API Deriv Anda\n\n"
+            "⚠️ *Token Anda akan dienkripsi dan disimpan dengan aman.*"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🔐 LOGIN", callback_data="start_login")],
+            [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
+        ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
@@ -567,11 +599,53 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if active_chat_id != new_chat_id:
                 active_chat_id = new_chat_id
                 chat_id_confirmed = True
-        save_chat_id(new_chat_id)
+        if new_chat_id is not None:
+            save_chat_id(new_chat_id)
     
     data = query.data
+    user_id = query.from_user.id if query.from_user else None
     
-    if data == "login_demo" or data == "login_real":
+    CALLBACKS_ALLOWED_WITHOUT_AUTH = {
+        "login_demo", "login_real", "login_cancel", 
+        "start_login", "menu_help"
+    }
+    
+    if data not in CALLBACKS_ALLOWED_WITHOUT_AUTH:
+        if not user_id or not auth_manager.is_authenticated(user_id):
+            await query.edit_message_text(
+                "🔒 **AKSES DITOLAK**\n\n"
+                "Anda belum login. Gunakan /login untuk masuk dengan token Deriv Anda.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔐 LOGIN", callback_data="start_login")]
+                ])
+            )
+            return
+    
+    if data == "start_login":
+        login_text = (
+            "🔐 **LOGIN KE DERIV**\n\n"
+            "Pilih tipe akun yang ingin Anda gunakan:\n\n"
+            "• **DEMO** 🎮 - Akun virtual untuk latihan\n"
+            "• **REAL** 💵 - Akun dengan uang asli\n\n"
+            "⚠️ *Token Anda akan dienkripsi dan disimpan dengan aman.*"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🎮 DEMO", callback_data="login_demo"),
+                InlineKeyboardButton("💵 REAL", callback_data="login_real")
+            ],
+            [InlineKeyboardButton("❌ Batal", callback_data="login_cancel")]
+        ]
+        
+        await query.edit_message_text(
+            login_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data == "login_demo" or data == "login_real":
         user_id = query.from_user.id if query.from_user else None
         if not user_id:
             await query.edit_message_text("❌ Error: User tidak teridentifikasi.")
@@ -1593,12 +1667,16 @@ def main():
     setup_trading_callbacks(telegram_token)
     
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("login", login_command))
+    app.add_handler(CommandHandler("logout", logout_command))
+    app.add_handler(CommandHandler("whoami", whoami_command))
     app.add_handler(CommandHandler("akun", akun_command))
     app.add_handler(CommandHandler("autotrade", autotrade_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, token_message_handler))
     
     logger.info("🤖 Bot is starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
