@@ -1,0 +1,107 @@
+TASK: Fix Deriv Trading Bot - ADX Filter & Confluence Threshold Too Strict
+
+PROBLEM CONTEXT:
+Bot sedang stuck di WAIT state karena ADX filter terlalu ketat dan confluence threshold terlalu tinggi. Console log menunjukkan:
+- Confluence scores 40-57/100 (MEDIUM/WEAK) tapi semua signal di-block
+- ADX selalu di filters_failed karena threshold 20 terlalu tinggi untuk Volatility Index
+- MIN_CONFLUENCE_SCORE = 65 terlalu tinggi, banyak signal valid dengan score 50-60 yang terlewat
+- Signal cooldown 45 detik terlalu lama, miss opportunities di volatile market
+- Memory log spam setiap 30 detik mengganggu debugging
+
+EVIDENCE FROM CONSOLE:
+INFO:strategy:📊 Confluence Score for SELL: 40/100 (WEAK) | Passed: ['PRICE_ACTION', 'MTF'] | Failed: ['ADX', 'EMA_SLOPE']
+INFO:strategy:📊 Confluence Score for SELL: 50/100 (MEDIUM) | Passed: ['EMA_SLOPE', 'PRICE_ACTION', 'MTF'] | Failed: ['ADX']
+INFO:strategy:📊 Confluence Score for SELL: 55/100 (MEDIUM) | Passed: ['EMA_SLOPE', 'PRICE_ACTION', 'MTF'] | Failed: ['ADX']
+INFO:strategy:📊 Confluence Score for SELL: 57/100 (MEDIUM) | Passed: ['EMA_SLOPE', 'PRICE_ACTION', 'MTF', 'RSI_MOMENTUM'] | Failed: ['ADX']
+
+Bot tidak execute trade meskipun RSI/EMA/MACD/Stochastic memberikan signal valid.
+
+FILES TO MODIFY:
+1. strategy.py - Line ~875: ADX_NO_TREND threshold
+2. strategy.py - Line ~40: MIN_CONFLUENCE_SCORE threshold
+3. strategy.py - Line ~45: COOLDOWN_SECONDS
+4. strategy.py - Line ~300: Memory log spam reduction
+
+SPECIFIC CHANGES REQUIRED:
+
+CHANGE 1: RELAX ADX FILTER (strategy.py, line ~875)
+Current: ADX_NO_TREND = 20
+New: ADX_NO_TREND = 15
+Rationale: 
+- Volatility indices sering memiliki ADX 15-20 yang sebenarnya masih tradeable
+- ADX 15-20 akan tetap allow trade dengan warning + reduced TP multiplier (0.7x)
+- ADX >= 20 proceed normal dengan full TP
+- Keep directional conflict detection (+DI/-DI) unchanged untuk safety
+
+CHANGE 2: LOWER CONFLUENCE THRESHOLD (strategy.py, line ~40)
+Current: MIN_CONFLUENCE_SCORE = 65
+New: MIN_CONFLUENCE_SCORE = 50
+Rationale:
+- Synthetic indices sangat volatile, confluence score 50-60 sudah layak trade
+- Score 40-49 akan tetap di-block (WEAK)
+- Score 50-69 akan proceed sebagai MEDIUM confidence
+- Score >= 70 proceed sebagai STRONG confidence
+- Keep scoring calculation unchanged, hanya threshold yang turun
+
+CHANGE 3: REDUCE SIGNAL COOLDOWN (strategy.py, line ~45)
+Current: COOLDOWN_SECONDS = 45
+New: COOLDOWN_SECONDS = 30
+Rationale:
+- Volatility 100 indices dapat memiliki signal valid setiap 30-60 detik
+- Cooldown 45 detik terlalu konservatif, miss banyak opportunities
+- 30 detik cukup untuk prevent overtrading tapi tidak miss signal bagus
+
+CHANGE 4: SUPPRESS MEMORY LOG SPAM (strategy.py, line ~300 in _log_memory_usage)
+Current: logger.info(f"📊 Memory stats @ tick...")
+New: logger.debug(f"📊 Memory stats @ tick...")
+Rationale:
+- Log "Memory stats @ tick 600" muncul setiap 30 detik untuk semua symbols
+- Mengganggu visibility untuk log trading penting
+- Tetap tersimpan di DEBUG level untuk troubleshooting jika dibutuhkan
+- Keep cleanup logic unchanged
+
+EXPECTED OUTCOME:
+1. Bot mulai execute trades dengan confluence score 50+ (MEDIUM/STRONG)
+2. ADX 15-20 tidak hard-block signal, hanya warning + reduced TP multiplier
+3. Cooldown 30 detik memberi lebih banyak opportunities tanpa overtrading
+4. Console log lebih bersih, fokus ke signal dan trading events
+5. Trading frequency meningkat dari 0 trades/hour → 3-5 trades/hour (estimate)
+
+TESTING INSTRUCTION:
+After applying changes, restart bot dan monitor selama 30-60 menit untuk verify:
+1. ✓ Apakah signal dengan confluence score 50-57 mulai execute trade?
+2. ✓ Apakah ADX 15-20 masih allow trade dengan warning log?
+3. ✓ Apakah console log "Memory stats" berkurang drastis?
+4. ✓ Apakah cooldown 30 detik tidak menyebabkan overtrading?
+5. ✓ Apakah win rate tetap terjaga di >40% setelah 10+ trades?
+
+SAFETY RULES - DO NOT MODIFY:
+❌ DO NOT change scoring calculation logic (_get_confluence_score internals)
+❌ DO NOT modify RSI/EMA/MACD/Stochastic thresholds atau formulas
+❌ DO NOT touch Martingale multiplier (MARTINGALE_MULTIPLIER = 2.1)
+❌ DO NOT modify risk management limits (MAX_LOSS_PERCENT, MAX_CONSECUTIVE_LOSSES)
+❌ DO NOT change directional conflict detection logic di check_adx_filter
+❌ DO NOT touch trading.py, deriv_ws.py, main.py, atau file lain
+❌ DO NOT change TP/SL multipliers (ATR_TP_MULTIPLIER, ATR_SL_MULTIPLIER)
+
+STRICT VERIFICATION CHECKLIST:
+After code changes, confirm ONLY these 4 specific lines changed:
+□ Line ~875: ADX_NO_TREND = 15 (was 20)
+□ Line ~40: MIN_CONFLUENCE_SCORE = 50 (was 65)
+□ Line ~45: COOLDOWN_SECONDS = 30 (was 45)
+□ Line ~300: logger.debug (was logger.info) in _log_memory_usage
+
+Total modifications: EXACTLY 4 lines
+Modified files: ONLY strategy.py
+Other files: UNCHANGED
+
+ROLLBACK PLAN:
+If after testing bot performance menurun (win rate <30% atau excessive losses):
+1. Revert MIN_CONFLUENCE_SCORE back to 65
+2. Revert ADX_NO_TREND back to 20
+3. Keep COOLDOWN_SECONDS = 30 (ini aman)
+4. Keep logger.debug for memory stats (ini cosmetic)
+
+PRIORITY: HIGH
+RISK LEVEL: LOW (only threshold adjustments, no logic changes)
+ESTIMATED IMPACT: 3-5x increase in trading frequency dengan maintained win rate
