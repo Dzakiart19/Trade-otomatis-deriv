@@ -53,6 +53,11 @@ Do not make changes to the file `Y`.
     - WebSocket connects using user's token automatically after login
     - Auto-reconnect on bot restart if saved session is valid
     - Invalid sessions are auto-cleared when decryption fails (e.g., SESSION_SECRET rotation)
+- **Real-Time Trading Notifications (v2.7)**:
+    - **Callback Registration Fix**: Trading callbacks are now set up immediately after TradingManager creation in connect_user_deriv()
+    - **Faster Updates**: Reduced notification debounce from 10s to 2s for progress, 30s to 3s for trade milestones
+    - **More Milestones**: Progress notifications at 0%, 25%, 50%, 75%, 100% for better visibility
+    - **Callback Logging**: on_trade_opened and on_trade_closed now log invocation for debugging
 
 ### Feature Specifications
 - **Supported Symbols**: Volatility indices (R_100, R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V) for 5-10 ticks duration, and frxXAUUSD (Gold/USD) for daily duration.
