@@ -1,4 +1,4 @@
-# Deriv Auto Trading Bot v2.0
+# Deriv Auto Trading Bot v2.1
 
 Bot Telegram untuk auto trading Binary Options di platform Deriv.
 
@@ -231,6 +231,58 @@ Format Durasi:
 6. **Fixed Progress Notification Bug**
    - Added proper logging for debugging
    - Fixed callback execution
+
+### Version 2.1 - Stability & Reliability Update
+
+1. **Error Recovery untuk Buy Failures**
+   - Buy timeout detection (30 detik)
+   - Auto-reset state setelah timeout
+   - Circuit breaker: 3 failures dalam 1 menit = 2 menit cooldown
+
+2. **WebSocket Reconnection yang Lebih Baik**
+   - Network check sebelum reconnect
+   - AUTH_TIMEOUT ditingkatkan ke 30 detik
+   - Clear subscriptions sebelum reconnect
+
+3. **Health Check Stability**
+   - Jitter untuk menghindari synchronized pings
+   - PING_TIMEOUT ditingkatkan ke 90 detik
+   - Grace period untuk transient failures
+
+4. **Enhanced Risk Management**
+   - Pre-flight validation sebelum setiap trade
+   - Total exposure calculation (Martingale level 3 projection)
+   - Auto-stop jika total risk > 30% balance
+
+5. **Session Recovery Mechanism**
+   - Auto-save session setiap 5 trades
+   - Restore session jika bot restart dalam 1 jam
+   - Flag enable/disable untuk kontrol
+
+6. **Graceful Shutdown Handler**
+   - SIGTERM/SIGINT signal handling
+   - Wait trading completion sebelum shutdown
+   - Auto-save session data
+
+7. **Progress Notification Optimization**
+   - Milestone-based (0%, 25%, 50%, 75%, 100%)
+   - Debouncing 10 detik minimum interval
+   - Mengurangi spam notifikasi
+
+8. **Telegram Message Format Fixes**
+   - Auto-escape special characters
+   - Retry 3x dengan exponential backoff
+   - Fallback ke plaintext jika Markdown gagal
+
+9. **Trade Journal CSV Validation**
+   - Integrity check sebelum write
+   - Backup file otomatis
+   - Atomic write dengan tempfile
+
+10. **Strategy Tick Buffer Optimization**
+    - Sliding window 200 ticks
+    - Memory cleanup otomatis
+    - Mengurangi memory usage
 
 ## Development
 
