@@ -18,6 +18,8 @@ Commands:
 import os
 import asyncio
 import logging
+import threading
+import requests
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -608,22 +610,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
 
 
-async def send_telegram_message(app: Application, message: str):
-    """Helper untuk kirim pesan ke Telegram dari thread lain"""
+def send_telegram_message_sync(token: str, message: str):
+    """
+    Helper synchronous untuk kirim pesan ke Telegram dari thread lain.
+    Menggunakan requests library untuk menghindari masalah asyncio event loop.
+    """
     global active_chat_id
-    if active_chat_id:
-        try:
-            await app.bot.send_message(
-                chat_id=active_chat_id,
-                text=message,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+    if not active_chat_id:
+        logger.warning("No active chat_id, cannot send message")
+        return False
+        
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": active_chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            logger.debug(f"Message sent successfully to chat {active_chat_id}")
+            return True
+        else:
+            logger.error(f"Failed to send message: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {e}")
+        return False
 
 
-def setup_trading_callbacks(app: Application):
-    """Setup callback functions untuk notifikasi trading"""
+def setup_trading_callbacks(telegram_token: str):
+    """Setup callback functions untuk notifikasi trading
+    
+    Args:
+        telegram_token: Token bot Telegram untuk mengirim pesan
+    """
     global trading_manager
     
     if not trading_manager:
@@ -640,11 +661,7 @@ def setup_trading_callbacks(app: Application):
             f"• Entry: {price:.5f}\n"
             f"• Stake: ${stake:.2f} (Rp {stake_idr:,.0f})"
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
+        send_telegram_message_sync(telegram_token, message)
         
     def on_trade_closed(is_win: bool, profit: float, balance: float,
                        trade_num: int, target: int, next_stake: float):
@@ -668,11 +685,7 @@ def setup_trading_callbacks(app: Application):
                 f"• Next Stake: ${next_stake:.2f} (Rp {next_stake_idr:,.0f})"
             )
             
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
+        send_telegram_message_sync(telegram_token, message)
         
     def on_session_complete(total: int, wins: int, losses: int, 
                            profit: float, win_rate: float):
@@ -687,25 +700,33 @@ def setup_trading_callbacks(app: Application):
             f"• Win Rate: {win_rate:.1f}%\n\n"
             f"{profit_emoji} Net P/L: ${profit:+.2f} (Rp {profit_idr:+,.0f})"
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
+        send_telegram_message_sync(telegram_token, message)
         
     def on_error(error_msg: str):
         """Callback saat terjadi error"""
         message = f"⚠️ **ERROR**\n\n{error_msg}"
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
+        send_telegram_message_sync(telegram_token, message)
+    
+    def on_progress(tick_count: int, required_ticks: int, rsi: float, trend: str):
+        """Callback untuk progress notification saat mengumpulkan data"""
+        if rsi > 0:
+            rsi_text = f"{rsi:.1f}"
+        else:
+            rsi_text = "calculating..."
+        message = (
+            f"📊 **Menganalisis market...**\n\n"
+            f"• Tick: {tick_count}/{required_ticks}\n"
+            f"• RSI: {rsi_text}\n"
+            f"• Trend: {trend}\n\n"
+            f"⏳ Menunggu sinyal trading..."
+        )
+        send_telegram_message_sync(telegram_token, message)
         
     trading_manager.on_trade_opened = on_trade_opened
     trading_manager.on_trade_closed = on_trade_closed
     trading_manager.on_session_complete = on_session_complete
     trading_manager.on_error = on_error
+    trading_manager.on_progress = on_progress
 
 
 def initialize_deriv():
@@ -751,7 +772,8 @@ def main():
     initialize_deriv()
     
     app = ApplicationBuilder().token(telegram_token).build()
-    setup_trading_callbacks(app)
+    
+    setup_trading_callbacks(telegram_token)
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("akun", akun_command))

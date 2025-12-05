@@ -126,6 +126,12 @@ class TradingManager:
         self.on_trade_closed: Optional[Callable] = None
         self.on_session_complete: Optional[Callable] = None
         self.on_error: Optional[Callable] = None
+        self.on_progress: Optional[Callable] = None
+        
+        # Progress tracking
+        self.tick_count: int = 0
+        self.progress_interval: int = 5
+        self.required_ticks: int = 15
         
         # Setup WebSocket callbacks
         self._setup_callbacks()
@@ -151,6 +157,17 @@ class TradingManager:
             
         # Jika auto trading aktif, analisis signal
         if self.state == TradingState.RUNNING:
+            self.tick_count += 1
+            
+            stats = self.strategy.get_stats()
+            current_tick_count = stats['tick_count']
+            
+            if self.tick_count % self.progress_interval == 0 and current_tick_count <= self.required_ticks:
+                if self.on_progress:
+                    rsi_value = stats['rsi'] if current_tick_count >= self.required_ticks else 0
+                    trend = stats['trend']
+                    self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
+            
             self._check_and_execute_signal()
             
     def _on_buy_response(self, data: dict):
@@ -433,6 +450,9 @@ class TradingManager:
         
         # Reset stake ke base
         self.current_stake = self.base_stake
+        
+        # Reset tick counter untuk progress tracking
+        self.tick_count = 0
         
         # Clear strategy history untuk fresh analysis
         self.strategy.clear_history()
