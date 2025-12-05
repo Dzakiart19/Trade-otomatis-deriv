@@ -65,11 +65,11 @@ class DerivWebSocket:
     AUTH_TIMEOUT = 30  # detik timeout untuk menunggu auth response (increased from 15)
     
     # Health check settings
-    HEALTH_CHECK_INTERVAL = 30  # detik
-    PING_TIMEOUT = 90  # detik - lebih toleran untuk network latency (increased from 60)
+    HEALTH_CHECK_INTERVAL = 60  # detik - mengurangi beban ping (increased from 30)
+    PING_TIMEOUT = 120  # detik - lebih toleran untuk network latency (increased from 90)
     MAX_MISSED_PONGS = 3  # jumlah pong yang boleh terlewat sebelum reconnect (increased from 2)
     GRACE_PERIOD_SECONDS = 10  # grace period sebelum force reconnect
-    PING_JITTER_MAX = 5  # maksimum jitter dalam detik untuk menghindari collision
+    PING_JITTER_MAX = 15  # maksimum jitter dalam detik untuk menghindari collision (increased from 5)
     
     def __init__(self, demo_token: str, real_token: str):
         """
@@ -307,6 +307,21 @@ class DerivWebSocket:
         
     def _handle_auth_retry(self, error_code: str, error_msg: str):
         """Handle retry logic untuk authorization yang gagal"""
+        
+        # InvalidToken - langsung fallback ke demo tanpa retry
+        if error_code == "InvalidToken":
+            logger.error(f"🚫 Token invalid terdeteksi: {error_msg}")
+            logger.error("   Token tidak valid atau sudah expired - tidak perlu retry")
+            
+            # Jika sedang mencoba real account, langsung fallback ke demo
+            if self.current_account_type == AccountType.REAL and self.demo_token:
+                logger.info("🔄 InvalidToken pada REAL account - langsung fallback ke DEMO")
+                self._try_fallback_to_demo()
+            else:
+                logger.error("❌ InvalidToken pada DEMO account - tidak bisa fallback")
+                logger.error("   Periksa kembali API token di environment variables")
+            return
+        
         self.auth_retry_count += 1
         
         # Calculate backoff delay
@@ -502,10 +517,10 @@ class DerivWebSocket:
         """
         Start health check thread untuk monitoring koneksi.
         
-        Enhancement v2.1:
-        - Tambahkan jitter pada ping interval untuk menghindari collision
-        - Grace period sebelum force reconnect
-        - Log lebih detail untuk debugging ping/pong cycle
+        Enhancement v2.2:
+        - Jitter 10-20 detik untuk avoid collision
+        - Interval 60 detik + jitter untuk mengurangi beban ping
+        - Reduced verbose logging untuk ping/pong
         """
         import random
         
@@ -516,15 +531,13 @@ class DerivWebSocket:
         def health_check_loop():
             while not self._stop_health_check and self.is_connected:
                 try:
-                    # Tambahkan jitter untuk menghindari collision (0 to PING_JITTER_MAX seconds)
-                    jitter = random.uniform(0, self.PING_JITTER_MAX)
+                    # Jitter 10-20 detik untuk avoid collision antar koneksi
+                    jitter = random.uniform(10, 20)
                     sleep_time = self.HEALTH_CHECK_INTERVAL + jitter
-                    logger.debug(f"🏥 Health check sleeping for {sleep_time:.1f}s (interval={self.HEALTH_CHECK_INTERVAL}s, jitter={jitter:.1f}s)")
                     
                     time.sleep(sleep_time)
                     
                     if not self.is_connected:
-                        logger.debug("Health check: connection lost, exiting loop")
                         break
                         
                     current_time = time.time()
@@ -533,10 +546,12 @@ class DerivWebSocket:
                     # Check if previous ping was answered
                     if self._awaiting_pong:
                         self._missed_pong_count += 1
-                        logger.warning(
-                            f"⚠️ Missed pong #{self._missed_pong_count}/{self.MAX_MISSED_PONGS} "
-                            f"(time since last pong: {time_since_pong:.1f}s)"
-                        )
+                        # Hanya log warning jika sudah mendekati batas
+                        if self._missed_pong_count >= self.MAX_MISSED_PONGS - 1:
+                            logger.warning(
+                                f"⚠️ Missed pong #{self._missed_pong_count}/{self.MAX_MISSED_PONGS} "
+                                f"(last pong: {time_since_pong:.0f}s ago)"
+                            )
                         
                         # Only force reconnect after multiple missed pongs AND grace period
                         if self._missed_pong_count >= self.MAX_MISSED_PONGS:
@@ -544,33 +559,26 @@ class DerivWebSocket:
                             if self._grace_period_start is None:
                                 self._grace_period_start = current_time
                                 logger.warning(
-                                    f"⏳ Entering grace period of {self.GRACE_PERIOD_SECONDS}s before force reconnect"
+                                    f"⏳ Grace period {self.GRACE_PERIOD_SECONDS}s sebelum reconnect"
                                 )
                             elif current_time - self._grace_period_start >= self.GRACE_PERIOD_SECONDS:
                                 # Grace period expired, force reconnect
                                 logger.error(
-                                    f"❌ Connection appears dead - no pong for {time_since_pong:.1f}s, "
-                                    f"grace period ({self.GRACE_PERIOD_SECONDS}s) expired"
+                                    f"❌ Connection dead - no pong for {time_since_pong:.0f}s"
                                 )
                                 self._force_reconnect()
                                 break
-                            else:
-                                remaining = self.GRACE_PERIOD_SECONDS - (current_time - self._grace_period_start)
-                                logger.warning(f"⏳ Grace period remaining: {remaining:.1f}s")
                     else:
                         # Pong received, reset counters and grace period
                         if self._missed_pong_count > 0:
-                            logger.info(f"✅ Connection recovered - pong received after {self._missed_pong_count} misses")
+                            logger.info(f"✅ Connection recovered after {self._missed_pong_count} missed pongs")
                         self._missed_pong_count = 0
                         self._grace_period_start = None
                     
-                    # Send ping
+                    # Send ping (tanpa verbose logging)
                     self._awaiting_pong = True
-                    ping_sent = self._send({"ping": 1})
-                    if ping_sent:
-                        logger.debug(f"📤 Ping sent for health check (awaiting pong, last pong: {time_since_pong:.1f}s ago)")
-                    else:
-                        logger.warning("❌ Failed to send ping for health check")
+                    if not self._send({"ping": 1}):
+                        logger.warning("❌ Failed to send ping")
                     
                 except Exception as e:
                     logger.error(f"Health check error: {type(e).__name__}: {e}")
@@ -578,7 +586,7 @@ class DerivWebSocket:
                     
         self.health_check_thread = threading.Thread(target=health_check_loop, daemon=True)
         self.health_check_thread.start()
-        logger.info("🏥 Health check thread started with jitter enabled")
+        logger.info("🏥 Health check started (interval=60s, jitter=10-20s)")
         
     def _force_reconnect(self):
         """Force close dan reconnect"""

@@ -23,7 +23,8 @@ import asyncio
 import logging
 import threading
 import requests
-from typing import Optional
+import hashlib
+from typing import Optional, Dict
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -72,6 +73,14 @@ MIN_NOTIFICATION_INTERVAL: float = 10.0
 
 import threading
 _chat_id_lock = threading.Lock()
+
+_last_message_hashes: Dict[str, float] = {}
+_MESSAGE_HASH_TTL: int = 60
+_message_hash_lock = threading.Lock()
+
+_last_send_time: Dict[int, float] = {}
+_MIN_SEND_INTERVAL: float = 1.0
+_rate_limit_lock = threading.Lock()
 
 
 def save_chat_id(chat_id: int) -> bool:
@@ -720,6 +729,70 @@ def log_telegram_error(message: str, error: str):
         logger.error(f"Failed to log telegram error: {e}")
 
 
+def _get_message_hash(message: str) -> str:
+    """Generate hash dari message untuk deduplication (thread-safe)"""
+    return hashlib.md5(message.encode('utf-8')).hexdigest()
+
+
+def _is_duplicate_message(message: str, chat_id: int) -> bool:
+    """
+    Check apakah message sudah dikirim dalam TTL window (thread-safe).
+    Juga membersihkan hash yang sudah expired.
+    
+    Args:
+        message: Pesan yang akan dicek
+        chat_id: ID chat target
+        
+    Returns:
+        True jika message adalah duplikat, False jika bukan
+    """
+    global _last_message_hashes
+    
+    current_time = time.time()
+    msg_hash = f"{chat_id}:{_get_message_hash(message)}"
+    
+    with _message_hash_lock:
+        expired_keys = [
+            key for key, timestamp in _last_message_hashes.items()
+            if current_time - timestamp > _MESSAGE_HASH_TTL
+        ]
+        for key in expired_keys:
+            del _last_message_hashes[key]
+        
+        if msg_hash in _last_message_hashes:
+            logger.debug(f"Duplicate message detected (hash: {msg_hash[:16]}...)")
+            return True
+        
+        _last_message_hashes[msg_hash] = current_time
+        return False
+
+
+def _check_rate_limit(chat_id: int) -> bool:
+    """
+    Check dan enforce rate limit per chat_id (thread-safe).
+    
+    Args:
+        chat_id: ID chat target
+        
+    Returns:
+        True jika boleh kirim (tidak rate limited), False jika harus menunggu
+    """
+    global _last_send_time
+    
+    current_time = time.time()
+    
+    with _rate_limit_lock:
+        if chat_id in _last_send_time:
+            time_since_last = current_time - _last_send_time[chat_id]
+            if time_since_last < _MIN_SEND_INTERVAL:
+                wait_time = _MIN_SEND_INTERVAL - time_since_last
+                logger.debug(f"Rate limit: waiting {wait_time:.2f}s for chat {chat_id}")
+                time.sleep(wait_time)
+        
+        _last_send_time[chat_id] = time.time()
+        return True
+
+
 def send_telegram_message_sync(token: str, message: str, use_html: bool = False):
     """
     Helper synchronous untuk kirim pesan ke Telegram dari thread lain.
@@ -727,8 +800,10 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
     
     Features:
     - Thread-safe dengan locking
-    - Retry dengan exponential backoff (max 3x)
-    - Fallback ke plain text jika Markdown gagal 2x
+    - Message deduplication dengan hash check (TTL 60 detik)
+    - Rate limiting per chat_id (min interval 1 detik)
+    - Retry dengan exponential backoff (1s, 2s, 4s, max 8s)
+    - Fallback ke plain text setelah 1x Markdown failure
     - Log failed messages ke file
     
     Args:
@@ -746,16 +821,24 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
         logger.warning("No active chat_id or not confirmed. Please send /start to the bot first.")
         return False
     
+    chat_id_to_use = current_chat_id
+    
+    if _is_duplicate_message(message, chat_id_to_use):
+        logger.info(f"Skipping duplicate message to chat {chat_id_to_use}")
+        return True
+    
+    _check_rate_limit(chat_id_to_use)
+    
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     parse_mode = "HTML" if use_html else "Markdown"
     max_retries = 3
+    max_backoff = 8
     
-    chat_id_to_use = current_chat_id
     markdown_failures = 0
     
     for attempt in range(max_retries):
         try:
-            if markdown_failures >= 2:
+            if markdown_failures >= 1:
                 payload = {
                     "chat_id": chat_id_to_use,
                     "text": message.replace('**', '').replace('*', '').replace('`', '').replace('_', '')
@@ -780,7 +863,7 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
                     markdown_failures += 1
                     logger.warning(f"Markdown parse error (attempt {attempt + 1}/{max_retries}): {error_desc}")
                     
-                    if markdown_failures >= 2:
+                    if markdown_failures >= 1:
                         logger.info("Falling back to plain text mode")
                         continue
                 else:
@@ -796,7 +879,7 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
                 logger.error(f"Telegram API error {response.status_code}: {response.text}")
                 log_telegram_error(message, f"Status {response.status_code}: {response.text}")
             
-            backoff_time = (2 ** attempt) * 0.5
+            backoff_time = min(2 ** attempt, max_backoff)
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {backoff_time}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(backoff_time)
@@ -805,17 +888,20 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
             logger.error(f"Telegram API timeout (attempt {attempt + 1}/{max_retries})")
             log_telegram_error(message, "Request timeout")
             if attempt < max_retries - 1:
-                time.sleep((2 ** attempt) * 0.5)
+                backoff_time = min(2 ** attempt, max_backoff)
+                time.sleep(backoff_time)
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error (attempt {attempt + 1}/{max_retries}): {e}")
             log_telegram_error(message, str(e))
             if attempt < max_retries - 1:
-                time.sleep((2 ** attempt) * 0.5)
+                backoff_time = min(2 ** attempt, max_backoff)
+                time.sleep(backoff_time)
         except Exception as e:
             logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {e}")
             log_telegram_error(message, str(e))
             if attempt < max_retries - 1:
-                time.sleep((2 ** attempt) * 0.5)
+                backoff_time = min(2 ** attempt, max_backoff)
+                time.sleep(backoff_time)
     
     logger.error("All retry attempts failed for Telegram message")
     return False

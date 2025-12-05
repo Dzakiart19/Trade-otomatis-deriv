@@ -268,14 +268,14 @@ class TradingManager:
     CIRCUIT_BREAKER_COOLDOWN = 120.0  # cooldown dalam detik setelah circuit breaker triggered
     
     # Enhanced risk management settings (Task 4)
-    MAX_TOTAL_RISK_PERCENT = 0.30  # auto-stop jika total risk > 30% balance
-    RISK_WARNING_PERCENT = 0.25  # warning jika mendekati risk limit
-    MARTINGALE_LOOK_AHEAD_LEVELS = 3  # check sampai martingale level 3
+    MAX_TOTAL_RISK_PERCENT = 0.20  # auto-stop jika total risk > 20% balance (lebih konservatif)
+    RISK_WARNING_PERCENT = 0.15  # warning lebih awal sebelum mencapai risk limit
+    MARTINGALE_LOOK_AHEAD_LEVELS = 5  # check sampai martingale level 5 untuk projected losses
     
     # Session recovery settings (Task 5)
     SESSION_RECOVERY_ENABLED = True
     SESSION_SAVE_INTERVAL = 5  # save session setiap 5 trades
-    SESSION_RECOVERY_MAX_AGE = 3600  # restore jika bot restart dalam 1 jam (3600 detik)
+    SESSION_RECOVERY_MAX_AGE = 1800  # restore jika bot restart dalam 30 menit (1800 detik)
     SESSION_RECOVERY_FILE = "logs/session_recovery.json"
     
     def __init__(self, deriv_ws: DerivWebSocket):
@@ -325,11 +325,12 @@ class TradingManager:
         # Session recovery tracking (Task 5)
         self.session_recovery_enabled: bool = self.SESSION_RECOVERY_ENABLED
         
-        # Progress notification tracking (Task 7)
+        # Progress notification tracking (Task 7) - Optimized untuk mengurangi spam
         self.last_progress_notification_time: float = 0.0
         self.last_notified_milestone: int = -1  # Track last milestone to avoid duplicate
-        self.PROGRESS_MILESTONES = [0, 25, 50, 75, 100]  # Only notify at these milestones
-        self.MIN_PROGRESS_NOTIFICATION_INTERVAL = 10.0  # Minimum 10 seconds between notifications
+        self.sent_milestones: set = set()  # Track ALL milestones sent in this session
+        self.PROGRESS_MILESTONES = [0, 50, 100]  # Reduced milestones to minimize notifications
+        self.MIN_PROGRESS_NOTIFICATION_INTERVAL = 30.0  # 30 seconds debounce between notifications
         
         # Statistics
         self.stats = SessionStats()
@@ -434,46 +435,49 @@ class TradingManager:
             current_tick_count = stats['tick_count']
             
             # Task 7: Progress notification optimization - milestone-based with time debouncing
-            # Only notify at milestones (0%, 25%, 50%, 75%, 100%) and max 1 per 10 seconds
+            # Only notify at milestones (0%, 50%, 100%) with 30s debounce between notifications
             if current_tick_count <= self.required_ticks:
                 progress_pct = int((current_tick_count / self.required_ticks) * 100)
                 
-                # Find the current milestone (0, 25, 50, 75, 100)
+                # Find the current milestone (0, 50, 100)
                 current_milestone = 0
                 for milestone in self.PROGRESS_MILESTONES:
                     if progress_pct >= milestone:
                         current_milestone = milestone
                 
-                # Always log progress for verbose debugging
+                # Get indicator values for milestone notification
                 rsi_value = stats['rsi'] if current_tick_count >= 15 else 0
                 trend = stats['trend']
-                logger.info(f"📊 Progress: {current_tick_count}/{self.required_ticks} ticks ({progress_pct}%) | RSI: {rsi_value} | Trend: {trend}")
                 
-                # Check if we should send notification (milestone-based + time debounce)
+                # Check if we should send notification:
+                # 1. Must be a new milestone (not sent before in this session)
+                # 2. Must pass time debounce interval (30 seconds)
+                # 3. First notification always allowed
                 time_since_last_notification = current_time - self.last_progress_notification_time
                 is_new_milestone = current_milestone > self.last_notified_milestone
+                is_milestone_not_sent = current_milestone not in self.sent_milestones
                 is_past_min_interval = time_since_last_notification >= self.MIN_PROGRESS_NOTIFICATION_INTERVAL
                 is_first_notification = self.last_progress_notification_time == 0.0
                 
                 should_notify = (
                     is_new_milestone and 
+                    is_milestone_not_sent and
                     (is_first_notification or is_past_min_interval)
                 )
                 
                 if should_notify:
-                    logger.info(f"📊 Progress notification triggered: milestone={current_milestone}%, interval={time_since_last_notification:.1f}s")
+                    # Only log when milestone is reached
+                    logger.info(f"📊 Milestone {current_milestone}% reached: {current_tick_count}/{self.required_ticks} ticks | RSI: {rsi_value} | Trend: {trend}")
+                    
                     if self.on_progress:
                         try:
                             self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
                             self.last_progress_notification_time = current_time
                             self.last_notified_milestone = current_milestone
-                            logger.info("✅ Progress callback executed successfully")
+                            self.sent_milestones.add(current_milestone)  # Track sent milestone
+                            logger.debug(f"✅ Progress notification sent for milestone {current_milestone}%")
                         except Exception as e:
                             logger.error(f"❌ Error calling on_progress callback: {type(e).__name__}: {e}")
-                            import traceback
-                            logger.error(f"Traceback: {traceback.format_exc()}")
-                    else:
-                        logger.warning("⚠️ on_progress callback is None - not registered!")
             
             self._check_and_execute_signal()
             
@@ -945,7 +949,7 @@ class TradingManager:
     
     def _restore_session_recovery(self) -> bool:
         """
-        Restore session data dari recovery file jika bot restart dalam 1 jam.
+        Restore session data dari recovery file jika bot restart dalam 30 menit.
         Task 5: Session Recovery Mechanism.
         
         Returns:
@@ -976,24 +980,48 @@ class TradingManager:
                 self._clear_session_recovery()
                 return False
             
+            stats_data = recovery_data.get("stats", {})
+            total_trades = stats_data.get("total_trades", 0)
+            wins = stats_data.get("wins", 0)
+            losses = stats_data.get("losses", 0)
+            
+            if total_trades != (wins + losses):
+                logger.warning(f"⚠️ Data integrity check failed: total_trades ({total_trades}) != wins ({wins}) + losses ({losses})")
+                logger.info("🗑️ Recovery file corrupt - clearing and starting fresh")
+                self._clear_session_recovery()
+                return False
+            
+            martingale_level = recovery_data.get("martingale_level", 0)
+            if not isinstance(martingale_level, int) or martingale_level < 0 or martingale_level > self.MAX_MARTINGALE_LEVEL:
+                logger.warning(f"⚠️ Invalid martingale_level: {martingale_level} (must be 0-{self.MAX_MARTINGALE_LEVEL})")
+                logger.info("🗑️ Recovery file corrupt - clearing and starting fresh")
+                self._clear_session_recovery()
+                return False
+            
+            current_stake = recovery_data.get("current_stake", MIN_STAKE_GLOBAL)
+            if not isinstance(current_stake, (int, float)) or current_stake < MIN_STAKE_GLOBAL:
+                logger.warning(f"⚠️ Invalid current_stake: {current_stake} (must be >= {MIN_STAKE_GLOBAL})")
+                logger.info("🗑️ Recovery file corrupt - clearing and starting fresh")
+                self._clear_session_recovery()
+                return False
+            
             self.symbol = recovery_data.get("symbol", DEFAULT_SYMBOL)
             self.base_stake = recovery_data.get("base_stake", MIN_STAKE_GLOBAL)
-            self.current_stake = recovery_data.get("current_stake", MIN_STAKE_GLOBAL)
+            self.current_stake = current_stake
             self.duration = recovery_data.get("duration", 5)
             self.duration_unit = recovery_data.get("duration_unit", "t")
             self.target_trades = recovery_data.get("target_trades", 0)
             
-            stats_data = recovery_data.get("stats", {})
-            self.stats.total_trades = stats_data.get("total_trades", 0)
-            self.stats.wins = stats_data.get("wins", 0)
-            self.stats.losses = stats_data.get("losses", 0)
+            self.stats.total_trades = total_trades
+            self.stats.wins = wins
+            self.stats.losses = losses
             self.stats.total_profit = stats_data.get("total_profit", 0.0)
             self.stats.starting_balance = stats_data.get("starting_balance", 0.0)
             self.stats.current_balance = stats_data.get("current_balance", 0.0)
             self.stats.highest_balance = stats_data.get("highest_balance", 0.0)
             self.stats.lowest_balance = stats_data.get("lowest_balance", 0.0)
             
-            self.martingale_level = recovery_data.get("martingale_level", 0)
+            self.martingale_level = martingale_level
             self.in_martingale_sequence = recovery_data.get("in_martingale_sequence", False)
             self.consecutive_losses = recovery_data.get("consecutive_losses", 0)
             self.daily_loss = recovery_data.get("daily_loss", 0.0)
@@ -1008,9 +1036,15 @@ class TradingManager:
             
             return True
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Recovery file JSON corrupt: {e}")
+            self._log_error(f"Session recovery JSON corrupt: {e}")
+            self._clear_session_recovery()
+            return False
         except Exception as e:
             logger.error(f"Failed to restore session recovery: {e}")
             self._log_error(f"Session recovery restore failed: {e}")
+            self._clear_session_recovery()
             return False
     
     def _clear_session_recovery(self):
@@ -1358,6 +1392,10 @@ class TradingManager:
         symbol_config = get_symbol_config(self.symbol)
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
+        # Hard cap: stake tidak boleh lebih dari 25% balance
+        hard_cap = balance * 0.25
+        max_stake = min(max_stake, hard_cap)
+        
         return round(max(min_stake, max_stake), 2)
     
     def _perform_preflight_risk_check(self, current_balance: float) -> tuple[bool, str]:
@@ -1366,7 +1404,8 @@ class TradingManager:
         Task 4: Enhanced Risk Management Validation.
         
         v2.2 Update: Lebih fleksibel untuk martingale sequence
-        - Saat dalam martingale (level > 0), gunakan lookahead 2 level
+        - Saat dalam martingale (level > 0), gunakan lookahead 3 level
+        - Hard cap 25% balance untuk stake maksimum
         - Selalu cap stake ke nilai aman, jangan stop trading
         - Hanya stop jika balance terlalu rendah untuk min stake
         
@@ -1383,14 +1422,21 @@ class TradingManager:
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
         # Tentukan lookahead berdasarkan martingale level
-        # Saat dalam sequence (level > 0), gunakan lookahead lebih rendah agar trading bisa lanjut
+        # Saat dalam sequence (level > 0), gunakan lookahead 3 level untuk balance fleksibilitas dan safety
         if self.martingale_level > 0:
-            lookahead = 2  # Lebih fleksibel saat dalam martingale sequence
+            lookahead = 3  # Check 3 level ke depan saat dalam martingale sequence
         else:
             lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
         
         # Hitung max safe stake dengan lookahead yang sesuai
         safe_stake = self._calculate_max_safe_stake(current_balance, lookahead)
+        
+        # Hard cap: stake tidak boleh lebih dari 25% balance
+        max_stake_cap = current_balance * 0.25
+        if self.current_stake > max_stake_cap:
+            old_stake = self.current_stake
+            self.current_stake = round(max_stake_cap, 2)
+            logger.warning(f"⚠️ Stake auto-capped: ${old_stake:.2f} -> ${self.current_stake:.2f} (max 25% balance)")
         
         # Jika current stake melebihi safe stake, cap ke safe stake
         if self.current_stake > safe_stake:
@@ -1638,6 +1684,7 @@ class TradingManager:
         # Reset progress notification tracking (Task 7)
         self.last_progress_notification_time = 0.0
         self.last_notified_milestone = -1
+        self.sent_milestones.clear()  # Reset sent milestones for new session
         
         # Reset risk management counters (hanya jika tidak ada recovery)
         if not session_restored:

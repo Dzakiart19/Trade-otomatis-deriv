@@ -23,7 +23,7 @@ Enhancement v2.2:
 - ADX indicator dan filter dengan +DI/-DI tracking
 - Price data validation (NaN/Inf/Negative protection)
 - Dynamic volatility-based position sizing
-- RSI entry range validation (20-35 for BUY, 65-80 for SELL)
+- RSI entry range validation (25-30 for BUY, 70-75 for SELL)
 - Enhanced confidence scoring dengan ADX/volatility factors
 =============================================================
 """
@@ -192,10 +192,10 @@ class TradingStrategy:
     RSI_PERIOD = 14
     RSI_OVERSOLD = 30
     RSI_OVERBOUGHT = 70
-    RSI_BUY_ENTRY_MIN = 20
-    RSI_BUY_ENTRY_MAX = 35
-    RSI_SELL_ENTRY_MIN = 65
-    RSI_SELL_ENTRY_MAX = 80
+    RSI_BUY_ENTRY_MIN = 25
+    RSI_BUY_ENTRY_MAX = 30
+    RSI_SELL_ENTRY_MIN = 70
+    RSI_SELL_ENTRY_MAX = 75
     
     EMA_FAST_PERIOD = 9
     EMA_SLOW_PERIOD = 21
@@ -214,9 +214,9 @@ class TradingStrategy:
     ATR_SL_MULTIPLIER = 1.5
     
     ADX_PERIOD = 14
-    ADX_STRONG_TREND = 20
-    ADX_WEAK_TREND = 15
-    ADX_NO_TREND = 10
+    ADX_STRONG_TREND = 25
+    ADX_WEAK_TREND = 20
+    ADX_NO_TREND = 20
     
     TREND_TICKS = 3
     MIN_TICK_HISTORY = 30
@@ -229,10 +229,10 @@ class TradingStrategy:
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
-    COOLDOWN_SECONDS = 30
+    COOLDOWN_SECONDS = 45
     VOLUME_HISTORY_SIZE = 20
     EMA_SLOPE_LOOKBACK = 5
-    MIN_CONFLUENCE_SCORE = 50
+    MIN_CONFLUENCE_SCORE = 65
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -659,9 +659,10 @@ class TradingStrategy:
         """Check ADX filter for trend strength with enhanced directional conflict detection.
         
         Enhancement v2.3:
-        - Added +5 threshold for directional conflict detection
-        - BUY conflict: minus_di > plus_di + 5
-        - SELL conflict: plus_di > minus_di + 5
+        - Added +10 threshold for directional conflict detection
+        - BUY conflict: minus_di > plus_di + 10
+        - SELL conflict: plus_di > minus_di + 10
+        - ADX < 20 is hard block (sideways market)
         
         Args:
             adx: Current ADX value
@@ -673,7 +674,7 @@ class TradingStrategy:
             Tuple of (is_valid, reason, tp_multiplier)
         """
         if adx < self.ADX_NO_TREND:
-            reason = f"❌ ADX terlalu lemah: {adx:.1f} < {self.ADX_NO_TREND} (sideways market)"
+            reason = f"❌ ADX terlalu lemah: {adx:.1f} < {self.ADX_NO_TREND} (sideways market - HARD BLOCK)"
             logger.debug(reason)
             return False, reason, 0.0
         
@@ -685,13 +686,13 @@ class TradingStrategy:
             di_info = f"+DI({plus_di:.1f}) > -DI({minus_di:.1f}) = Bullish"
             if signal_type == "SELL":
                 directional_conflict = True
-                if plus_di > minus_di + 5:
+                if plus_di > minus_di + 10:
                     conflict_warning = True
         elif minus_di > plus_di:
             di_info = f"-DI({minus_di:.1f}) > +DI({plus_di:.1f}) = Bearish"
             if signal_type == "BUY":
                 directional_conflict = True
-                if minus_di > plus_di + 5:
+                if minus_di > plus_di + 10:
                     conflict_warning = True
         else:
             di_info = f"+DI({plus_di:.1f}) ≈ -DI({minus_di:.1f}) = Neutral"
@@ -992,14 +993,14 @@ class TradingStrategy:
             reason = f"✅ Volume NORMAL: ratio={volume_ratio:.2f}x"
             logger.debug(reason)
             return True, reason, 1.0
-        elif volume_ratio > 0.5:
+        elif volume_ratio > 0.7:
             reason = f"⚠️ Volume WEAK: ratio={volume_ratio:.2f}x"
             logger.debug(reason)
             return True, reason, 0.9
         else:
-            reason = f"❌ Volume VERY WEAK: ratio={volume_ratio:.2f}x"
+            reason = f"❌ Volume TOO WEAK: ratio={volume_ratio:.2f}x < 0.7 (BLOCKED)"
             logger.debug(reason)
-            return False, reason, 0.8
+            return False, reason, 0.0
     
     def check_price_action(self, signal_type: str) -> Tuple[bool, str, Dict[str, Any]]:
         """Price Action Confirmation with Wick Validation.
@@ -1336,8 +1337,8 @@ class TradingStrategy:
         Analisis utama dengan multi-indicator confirmation.
         
         Enhanced Signal Requirements:
-        BUY (CALL): RSI in 20-35 AND EMA9 > EMA21 AND MACD histogram > 0 AND Stoch < 20 AND ADX >= 15
-        SELL (PUT): RSI in 65-80 AND EMA9 < EMA21 AND MACD histogram < 0 AND Stoch > 80 AND ADX >= 15
+        BUY (CALL): RSI in 25-30 AND EMA9 > EMA21 AND MACD histogram > 0 AND Stoch < 20 AND ADX >= 20
+        SELL (PUT): RSI in 70-75 AND EMA9 < EMA21 AND MACD histogram < 0 AND Stoch > 80 AND ADX >= 20
         
         Enhanced Scoring:
         - RSI oversold/overbought: +0.35
