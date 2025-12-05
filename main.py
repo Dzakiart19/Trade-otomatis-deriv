@@ -52,6 +52,8 @@ active_chat_id: Optional[int] = None
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
     global active_chat_id
+    if not update.effective_chat or not update.message:
+        return
     active_chat_id = update.effective_chat.id
     
     welcome_text = (
@@ -89,6 +91,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /akun"""
     global deriv_ws
+    if not update.message:
+        return
     
     if not deriv_ws or not deriv_ws.is_ready():
         await update.message.reply_text(
@@ -129,6 +133,8 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /autotrade [stake] [durasi] [target]"""
     global trading_manager
+    if not update.message:
+        return
     
     if not trading_manager:
         await update.message.reply_text("❌ Trading manager belum siap.")
@@ -181,6 +187,8 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /stop"""
     global trading_manager
+    if not update.message:
+        return
     
     if not trading_manager:
         await update.message.reply_text("❌ Trading manager belum siap.")
@@ -193,6 +201,8 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /status"""
     global deriv_ws, trading_manager
+    if not update.message:
+        return
     
     if deriv_ws and deriv_ws.is_ready():
         ws_status = "✅ Terkoneksi"
@@ -221,6 +231,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /help"""
+    if not update.message:
+        return
     help_text = (
         "📚 **PANDUAN PENGGUNAAN**\n\n"
         "**1️⃣ Setup Akun**\n"
@@ -256,6 +268,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global deriv_ws, trading_manager
     
     query = update.callback_query
+    if not query or not query.data:
+        return
     await query.answer()
     
     data = query.data
@@ -466,10 +480,11 @@ def setup_trading_callbacks(app: Application):
             f"• Entry: {price:.5f}\n"
             f"• Stake: ${stake:.2f}"
         )
-        asyncio.run_coroutine_threadsafe(
-            send_telegram_message(app, message),
-            app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
         
     def on_trade_closed(is_win: bool, profit: float, balance: float,
                        trade_num: int, target: int, next_stake: float):
@@ -490,10 +505,11 @@ def setup_trading_callbacks(app: Application):
                 f"• Next Stake: ${next_stake:.2f} (Martingale)"
             )
             
-        asyncio.run_coroutine_threadsafe(
-            send_telegram_message(app, message),
-            app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
         
     def on_session_complete(total: int, wins: int, losses: int, 
                            profit: float, win_rate: float):
@@ -507,18 +523,20 @@ def setup_trading_callbacks(app: Application):
             f"• Win Rate: {win_rate:.1f}%\n\n"
             f"{profit_emoji} Net P/L: ${profit:+.2f}"
         )
-        asyncio.run_coroutine_threadsafe(
-            send_telegram_message(app, message),
-            app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
         
     def on_error(error_msg: str):
         """Callback saat terjadi error"""
         message = f"⚠️ **ERROR**\n\n{error_msg}"
-        asyncio.run_coroutine_threadsafe(
-            send_telegram_message(app, message),
-            app.loop if hasattr(app, 'loop') else asyncio.get_event_loop()
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram_message(app, message), loop)
         
     trading_manager.on_trade_opened = on_trade_opened
     trading_manager.on_trade_closed = on_trade_closed
