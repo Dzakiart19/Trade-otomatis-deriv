@@ -117,6 +117,60 @@ def load_chat_id() -> Optional[int]:
         return None
 
 
+def cleanup_old_logs(max_days: int = 1, keep_today_trades: bool = True) -> int:
+    """
+    Auto-cleanup file log dan backup lama untuk menghemat penyimpanan.
+    
+    Args:
+        max_days: Hapus file lebih tua dari N hari (default: 1)
+        keep_today_trades: Simpan file trades hari ini (default: True)
+    
+    Returns:
+        Jumlah file yang dihapus
+    """
+    import glob
+    from datetime import datetime, timedelta
+    
+    logs_dir = "logs"
+    if not os.path.exists(logs_dir):
+        return 0
+    
+    deleted_count = 0
+    today_str = datetime.now().strftime("%Y%m%d")
+    cutoff_time = time.time() - (max_days * 86400)
+    
+    patterns_to_clean = [
+        "trades_*_backup_*.csv",
+        "analytics_*.json",
+        "session_*.txt",
+    ]
+    
+    for pattern in patterns_to_clean:
+        for filepath in glob.glob(os.path.join(logs_dir, pattern)):
+            try:
+                file_mtime = os.path.getmtime(filepath)
+                if file_mtime < cutoff_time:
+                    os.remove(filepath)
+                    deleted_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete {filepath}: {e}")
+    
+    if not keep_today_trades:
+        for filepath in glob.glob(os.path.join(logs_dir, "trades_*.csv")):
+            if "_backup_" not in filepath:
+                try:
+                    if today_str not in filepath:
+                        os.remove(filepath)
+                        deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete {filepath}: {e}")
+    
+    if deleted_count > 0:
+        logger.info(f"🧹 Auto-cleanup: Deleted {deleted_count} old log files")
+    
+    return deleted_count
+
+
 def connect_user_deriv(user_id: int) -> tuple[bool, str]:
     """
     Koneksi atau reconnect WebSocket dengan token user yang sudah login.
@@ -1760,6 +1814,8 @@ def initialize_deriv():
 def main():
     """Main function - entry point aplikasi"""
     global active_chat_id, chat_id_confirmed
+    
+    cleanup_old_logs(max_days=1)
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     
