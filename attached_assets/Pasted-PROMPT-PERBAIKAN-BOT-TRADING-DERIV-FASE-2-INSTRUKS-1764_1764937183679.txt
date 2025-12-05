@@ -1,0 +1,201 @@
+PROMPT PERBAIKAN BOT TRADING DERIV - FASE 2
+==============================================
+
+INSTRUKSI UTAMA:
+- JANGAN ubah kode yang sudah berfungsi dengan baik
+- HANYA perbaiki bagian yang bermasalah atau tambahkan fitur baru
+- Fokus pada stabilitas, error handling, dan risk management
+- Jangan ubah logic strategy, Martingale, atau signal generation
+
+==============================================
+
+PRIORITAS 1: PERBAIKAN CRITICAL (WAJIB)
+---------------------------------------
+
+1.1 PERBAIKI ADX DIRECTIONAL CONFLICT DETECTION
+File: strategy.py
+Method: check_adx_filter()
+Masalah: Terlalu banyak minor conflict warning, perlu threshold lebih ketat
+
+Perbaikan yang diperlukan:
+- Tambahkan threshold +10 untuk directional conflict
+- BUY conflict: minus_di > plus_di + 10
+- SELL conflict: plus_di > minus_di + 10
+- ADR < 20 adalah hard block (sideways market)
+- Log detail untuk debugging
+
+JANGAN ubah: ADX calculation, ADX_STRONG_TREND constant
+
+
+1.2 TAMBAHKAN MULTI-TIMEFRAME TREND CONFIRMATION
+File: strategy.py
+Method: Buat method baru check_mtf_trend_confirmation()
+Masalah: Signal kadang counter-trend, butuh konfirmasi M5
+
+Tambahkan:
+- Method untuk check M5 EMA alignment
+- BUY: M5 EMA fast > M5 EMA slow AND M5 RSI > 40
+- SELL: M5 EMA fast < M5 EMA slow AND M5 RSI < 60
+- Return (is_aligned, reason, score_multiplier)
+- Integrate ke analyze() method dengan bonus score
+
+JANGAN ubah: Existing indicator calculations
+
+
+1.3 TAMBAHKAN EMA SLOPE FILTER
+File: strategy.py
+Method: Buat method check_ema_slope()
+Masalah: EMA crossover kadang false signal saat sideways
+
+Tambahkan:
+- Track last 5 EMA fast values
+- Calculate slope dari EMA values
+- BUY: EMA slope harus bullish atau flat
+- SELL: EMA slope harus bearish atau flat
+- Return (is_valid, reason, slope_data)
+
+JANGAN ubah: EMA calculation atau period
+
+
+1.4 TAMBAHKAN VOLUME FILTER (ESTIMATION)
+File: strategy.py
+Method: Buat method check_volume_filter()
+Masalah: Butuh volume confirmation untuk signal quality
+
+Tambahkan:
+- Estimate volume dari price movement (last 20 ticks)
+- Current volume vs average volume ratio
+- Strong volume: ratio > 1.5x
+- Weak volume: ratio < 0.7x (block signal)
+- Return (is_valid, reason, confidence_multiplier)
+
+JANGAN ubah: Price tick handling
+
+
+1.5 TAMBAHKAN PRICE ACTION CONFIRMATION
+File: strategy.py
+Method: Buat method check_price_action()
+Masalah: Perlu wick validation untuk reversal detection
+
+Tambahkan:
+- Detect long upper/lower wicks dari tick data
+- BUY: Block jika long upper wick detected
+- SELL: Block jika long lower wick detected
+- Calculate wick ratio from high/low/close
+- Return (is_valid, reason, pattern_info)
+
+JANGAN ubah: Tick history management
+
+
+==============================================
+
+PRIORITAS 2: ENHANCEMENT (PENTING)
+-----------------------------------
+
+2.1 TAMBAHKAN SIGNAL COOLDOWN SYSTEM
+File: strategy.py
+Tambahkan di class TradingStrategy
+
+Masalah: Signal terlalu sering, butuh cooldown antar signal
+
+Tambahkan:
+- Track last_buy_time dan last_sell_time
+- Min interval 45 detik antar signal type yang sama
+- Method should_generate_signal(signal_type) -> bool
+- Update timestamp setelah signal generated
+
+JANGAN ubah: Signal scoring atau confidence calculation
+
+
+2.2 TAMBAHKAN CONFLUENCE SCORING SYSTEM
+File: strategy.py
+Method: Buat get_confluence_score()
+Masalah: Butuh aggregated score dari semua filter
+
+Tambahkan:
+- Aggregate scores: ADX (20%), EMA slope (15%), Volume (15%), Price action (15%), MTF (20%), RSI momentum (15%)
+- Total score 0-100
+- Confidence level: STRONG (≥70), MEDIUM (≥50), WEAK (<50)
+- Block signal jika confluence < 50
+- Return (total_score, confidence_level, details)
+
+JANGAN ubah: Individual indicator calculations
+
+
+2.3 OPTIMASI STAKE CALCULATION DENGAN VOLATILITY
+File: trading.py
+Method: _calculate_max_safe_stake()
+Masalah: Stake tidak adjust dengan volatility zone
+
+Perbaikan:
+- Integrate volatility_multiplier dari strategy
+- EXTREME_LOW zone: stake * 0.5
+- LOW zone: stake * 0.7
+- NORMAL zone: stake * 1.0
+- HIGH/EXTREME_HIGH zone: stake * 0.85
+- Update _perform_preflight_risk_check()
+
+JANGAN ubah: Martingale multiplier logic
+
+
+==============================================
+
+PRIORITAS 3: NICE TO HAVE (OPTIONAL)
+-------------------------------------
+
+3.1 TAMBAHKAN NaN/Inf PROTECTION
+File: strategy.py
+Di bagian indicator calculations
+
+Tambahkan:
+- Helper function is_valid_number(value)
+- Helper function safe_float(value, default)
+- Helper function safe_divide(a, b, default)
+- Validate semua float operations
+- Log warning jika NaN/Inf detected
+
+JANGAN ubah: Calculation formulas
+
+
+3.2 PERBAIKI CSV HEADER VALIDATION
+File: trading.py
+Method: _log_trade_to_journal()
+
+Enhancement:
+- Validate CSV header sebelum append
+- Auto-repair header jika missing/corrupt
+- Tambahkan _validate_csv_integrity()
+- Tambahkan _repair_csv_header()
+
+JANGAN ubah: Trade data structure
+
+
+3.3 TAMBAHKAN STRATEGY MEMORY CLEANUP
+File: strategy.py
+Method: Tambahkan _perform_memory_cleanup()
+
+Enhancement:
+- Cleanup indicators jika tick_count > 500
+- Reset old history values
+- Periodic garbage collection
+- Log memory stats tiap 100 ticks
+
+JANGAN ubah: Sliding window size (200)
+
+
+==============================================
+
+TESTING CHECKLIST:
+------------------
+
+Setelah perbaikan, test:
+1. Signal generation masih berfungsi normal
+2. Martingale recovery masih aktif
+3. Risk management checks aktif
+4. Confluence scoring bekerja
+5. CSV logging masih atomic
+6. Session recovery masih berfungsi
+7. No NaN/Inf errors dalam 100+ trades
+8. Balance tidak pernah negative
+
+==============================================
