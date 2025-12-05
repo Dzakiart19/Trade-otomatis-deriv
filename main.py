@@ -266,38 +266,50 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /help"""
     if not update.message:
         return
-    help_text = (
-        "📚 **PANDUAN PENGGUNAAN**\n\n"
-        "**1️⃣ Setup Akun**\n"
-        "Gunakan /akun untuk:\n"
-        "• Cek saldo real-time\n"
-        "• Switch antara Demo/Real\n\n"
-        "**2️⃣ Mulai Trading**\n"
-        "Format: `/autotrade [stake] [durasi] [target] [symbol]`\n\n"
-        "Contoh:\n"
-        "• `/autotrade` - Default ($0.50, 5t, 5 trade, R_100)\n"
-        "• `/autotrade 0.5` - Stake $0.5\n"
-        "• `/autotrade 1 5t 10` - $1, 5 ticks, 10 trade\n"
-        "• `/autotrade 0.50 5t 0 R_50` - Unlimited, R_50\n\n"
-        "**Format Durasi:**\n"
-        "• `5t` = 5 ticks (untuk Synthetic)\n"
-        "• `30s` = 30 detik\n"
-        "• `1m` = 1 menit\n"
-        "• `1d` = 1 hari (untuk XAUUSD)\n\n"
-        "**3️⃣ Symbol Tersedia**\n"
-        "Short-term (ticks): R_100, R_75, R_50, R_25, R_10\n"
-        "1-second: 1HZ100V, 1HZ75V, 1HZ50V\n"
-        "Long-term (hari): frxXAUUSD\n\n"
-        "**4️⃣ Strategi RSI**\n"
-        "• BUY (Call): RSI < 30 (Oversold)\n"
-        "• SELL (Put): RSI > 70 (Overbought)\n\n"
-        "**5️⃣ Martingale**\n"
-        "• WIN: Stake reset ke awal\n"
-        "• LOSS: Stake x 2.1\n\n"
-        "⚠️ *Trading memiliki risiko tinggi!*"
-    )
     
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    try:
+        help_text = (
+            "📚 <b>PANDUAN PENGGUNAAN</b>\n\n"
+            "<b>1️⃣ Setup Akun</b>\n"
+            "Gunakan /akun untuk:\n"
+            "• Cek saldo real-time\n"
+            "• Switch antara Demo/Real\n\n"
+            "<b>2️⃣ Mulai Trading</b>\n"
+            "Format: <code>/autotrade [stake] [durasi] [target] [symbol]</code>\n\n"
+            "Contoh:\n"
+            "• <code>/autotrade</code> - Default ($0.50, 5t, 5 trade, R_100)\n"
+            "• <code>/autotrade 0.5</code> - Stake $0.5\n"
+            "• <code>/autotrade 1 5t 10</code> - $1, 5 ticks, 10 trade\n"
+            "• <code>/autotrade 0.50 5t 0 R_50</code> - Unlimited, R_50\n\n"
+            "<b>Format Durasi:</b>\n"
+            "• <code>5t</code> = 5 ticks (untuk Synthetic)\n"
+            "• <code>30s</code> = 30 detik\n"
+            "• <code>1m</code> = 1 menit\n"
+            "• <code>1d</code> = 1 hari (untuk XAUUSD)\n\n"
+            "<b>3️⃣ Symbol Tersedia</b>\n"
+            "Short-term (ticks): R_100, R_75, R_50, R_25, R_10\n"
+            "1-second: 1HZ100V, 1HZ75V, 1HZ50V\n"
+            "Long-term (hari): frxXAUUSD\n\n"
+            "<b>4️⃣ Strategi RSI</b>\n"
+            "• BUY (Call): RSI &lt; 30 (Oversold)\n"
+            "• SELL (Put): RSI &gt; 70 (Overbought)\n\n"
+            "<b>5️⃣ Martingale</b>\n"
+            "• WIN: Stake reset ke awal\n"
+            "• LOSS: Stake x 2.1\n\n"
+            "⚠️ <i>Trading memiliki risiko tinggi!</i>"
+        )
+        
+        await update.message.reply_text(help_text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in help_command: {e}")
+        await update.message.reply_text(
+            "📚 PANDUAN PENGGUNAAN\n\n"
+            "1. /akun - Cek saldo dan switch akun\n"
+            "2. /autotrade - Mulai auto trading\n"
+            "3. /stop - Hentikan trading\n"
+            "4. /status - Cek status bot\n\n"
+            "Contoh: /autotrade 0.50 5t 5 R_100"
+        )
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -524,7 +536,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data == "menu_help":
         help_text = (
-            "📚 **QUICK HELP**\n\n"
+            "📚 <b>QUICK HELP</b>\n\n"
             "• /akun - Kelola akun\n"
             "• /autotrade - Mulai trading\n"
             "• /stop - Stop trading\n"
@@ -534,7 +546,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("« Kembali", callback_data="menu_main")]]
         await query.edit_message_text(
             help_text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
@@ -599,21 +611,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif data == "akun_reset":
         if deriv_ws:
-            deriv_ws.disconnect()
-            deriv_ws.connect()
-            await query.edit_message_text(
-                "🔌 Mereset koneksi...\n\nTunggu beberapa detik.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Kembali", callback_data="menu_akun")]
-                ])
-            )
+            try:
+                logger.info("User requested connection reset")
+                deriv_ws.disconnect()
+                await asyncio.sleep(1)  # Brief pause before reconnect
+                deriv_ws.connect()
+                await query.edit_message_text(
+                    "🔌 Mereset koneksi...\n\nTunggu beberapa detik.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("« Kembali", callback_data="menu_akun")]
+                    ])
+                )
+            except Exception as e:
+                logger.error(f"Error resetting connection: {e}")
+                await query.edit_message_text(
+                    f"❌ Gagal mereset koneksi: {str(e)[:50]}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("« Kembali", callback_data="menu_akun")]
+                    ])
+                )
             
 
 
-def send_telegram_message_sync(token: str, message: str):
+def escape_markdown(text: str) -> str:
+    """Escape karakter khusus untuk Telegram Markdown"""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+def send_telegram_message_sync(token: str, message: str, use_html: bool = False):
     """
     Helper synchronous untuk kirim pesan ke Telegram dari thread lain.
     Menggunakan requests library untuk menghindari masalah asyncio event loop.
+    
+    Args:
+        token: Bot token
+        message: Pesan yang akan dikirim
+        use_html: Jika True, gunakan HTML parse mode, jika False coba Markdown lalu plain text
     """
     global active_chat_id
     if not active_chat_id:
@@ -622,20 +658,43 @@ def send_telegram_message_sync(token: str, message: str):
         
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
+        
+        # Coba kirim dengan parse mode
+        parse_mode = "HTML" if use_html else "Markdown"
         payload = {
             "chat_id": active_chat_id,
             "text": message,
-            "parse_mode": "Markdown"
+            "parse_mode": parse_mode
         }
         response = requests.post(url, json=payload, timeout=10)
+        
         if response.status_code == 200:
             logger.debug(f"Message sent successfully to chat {active_chat_id}")
             return True
         else:
-            logger.error(f"Failed to send message: {response.text}")
-            return False
+            # Jika gagal dengan Markdown, coba tanpa parse mode
+            logger.warning(f"Failed to send with {parse_mode}, trying plain text")
+            payload_plain = {
+                "chat_id": active_chat_id,
+                "text": message.replace('**', '').replace('*', '').replace('`', '')
+            }
+            response_plain = requests.post(url, json=payload_plain, timeout=10)
+            
+            if response_plain.status_code == 200:
+                logger.debug(f"Message sent as plain text to chat {active_chat_id}")
+                return True
+            else:
+                logger.error(f"Failed to send message: {response_plain.text}")
+                return False
+                
+    except requests.exceptions.Timeout:
+        logger.error("Telegram API timeout")
+        return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error sending Telegram message: {e}")
+        return False
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+        logger.error(f"Unexpected error sending Telegram message: {e}")
         return False
 
 
@@ -730,32 +789,66 @@ def setup_trading_callbacks(telegram_token: str):
 
 
 def initialize_deriv():
-    """Inisialisasi koneksi Deriv WebSocket"""
+    """Inisialisasi koneksi Deriv WebSocket dengan retry dan error handling"""
     global deriv_ws, trading_manager
     
     demo_token = os.environ.get("DERIV_TOKEN_DEMO", "")
     real_token = os.environ.get("DERIV_TOKEN_REAL", "")
     
+    logger.info("=" * 50)
+    logger.info("INITIALIZING DERIV CONNECTION")
+    logger.info("=" * 50)
+    
+    # Log token availability (tanpa expose token)
+    logger.info(f"Demo token available: {'Yes' if demo_token else 'No'}")
+    logger.info(f"Real token available: {'Yes' if real_token else 'No'}")
+    
     if not demo_token and not real_token:
         logger.warning("⚠️ No Deriv tokens found in environment!")
         logger.info("Please set DERIV_TOKEN_DEMO and/or DERIV_TOKEN_REAL in Replit Secrets")
+        logger.info("Bot akan tetap berjalan tapi tidak bisa trading.")
         return False
-        
-    deriv_ws = DerivWebSocket(
-        demo_token=demo_token,
-        real_token=real_token
-    )
     
-    if deriv_ws.connect():
-        if deriv_ws.wait_until_ready(timeout=30):
-            logger.info("✅ Deriv WebSocket ready!")
-            trading_manager = TradingManager(deriv_ws)
-            return True
+    try:
+        deriv_ws = DerivWebSocket(
+            demo_token=demo_token,
+            real_token=real_token
+        )
+        
+        if deriv_ws.connect():
+            # Tunggu authorization dengan timeout
+            if deriv_ws.wait_until_ready(timeout=45):
+                logger.info("✅ Deriv WebSocket ready!")
+                trading_manager = TradingManager(deriv_ws)
+                
+                # Log account info
+                if deriv_ws.account_info:
+                    logger.info(f"   Account: {deriv_ws.account_info.account_id}")
+                    logger.info(f"   Balance: {deriv_ws.account_info.balance} {deriv_ws.account_info.currency}")
+                    logger.info(f"   Type: {'Demo' if deriv_ws.account_info.is_virtual else 'Real'}")
+                    
+                logger.info("=" * 50)
+                return True
+            else:
+                # Log detail error
+                logger.error("❌ Deriv WebSocket timeout waiting for authorization")
+                logger.error(f"   Connection state: {deriv_ws.get_connection_status()}")
+                logger.error(f"   Last error: {deriv_ws.get_last_auth_error()}")
+                logger.info("Bot akan tetap berjalan. Coba /akun untuk reconnect.")
+                logger.info("=" * 50)
+                
+                # Tetap buat trading manager untuk retry nanti
+                trading_manager = TradingManager(deriv_ws)
+                return False
         else:
-            logger.error("❌ Deriv WebSocket timeout waiting for authorization")
+            logger.error("❌ Failed to connect to Deriv WebSocket")
+            logger.info("Periksa koneksi internet dan coba lagi.")
+            logger.info("=" * 50)
             return False
-    else:
-        logger.error("❌ Failed to connect to Deriv")
+            
+    except Exception as e:
+        logger.error(f"❌ Exception during Deriv initialization: {type(e).__name__}: {e}")
+        logger.info("=" * 50)
         return False
 
 
