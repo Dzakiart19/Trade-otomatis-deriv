@@ -69,6 +69,11 @@ class TradingStrategy:
     """
     Kelas utama untuk strategi trading dengan multi-indicator confirmation.
     Menggabungkan RSI, EMA, MACD, Stochastic, dan ATR.
+    
+    Enhancement v2.1:
+    - Sliding window max 200 ticks (dari 100)
+    - Periodic memory cleanup tiap 100 ticks
+    - Memory usage logging untuk monitoring
     """
     
     RSI_PERIOD = 14
@@ -97,19 +102,35 @@ class TradingStrategy:
     
     MIN_CONFIDENCE_THRESHOLD = 0.5
     
+    # Memory management constants
+    MAX_TICK_HISTORY = 200  # increased from 100
+    MEMORY_CLEANUP_INTERVAL = 100  # cleanup setiap 100 ticks
+    INDICATOR_RESET_THRESHOLD = 500  # reset old indicators jika tick_count > 500
+    
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
         self.tick_history: List[float] = []
         self.high_history: List[float] = []
         self.low_history: List[float] = []
         self.last_indicators = IndicatorValues()
+        self.total_tick_count = 0  # track total ticks untuk memory management
+        self._last_memory_log_time = 0
         
     def add_tick(self, price: float) -> None:
         """
         Tambahkan tick baru ke history.
         Untuk synthetic indices, high/low approximated dari price movement.
+        
+        Enhancement v2.1:
+        - Sliding window max 200 ticks
+        - Periodic memory cleanup
+        - Memory usage logging
         """
+        import time
+        import sys
+        
         self.tick_history.append(price)
+        self.total_tick_count += 1
         
         if len(self.tick_history) > 1:
             prev_price = self.tick_history[-2]
@@ -122,11 +143,60 @@ class TradingStrategy:
         self.high_history.append(high)
         self.low_history.append(low)
         
-        max_history = 100
-        if len(self.tick_history) > max_history:
-            self.tick_history = self.tick_history[-max_history:]
-            self.high_history = self.high_history[-max_history:]
-            self.low_history = self.low_history[-max_history:]
+        # Sliding window dengan max 200 ticks (increased dari 100)
+        if len(self.tick_history) > self.MAX_TICK_HISTORY:
+            self.tick_history = self.tick_history[-self.MAX_TICK_HISTORY:]
+            self.high_history = self.high_history[-self.MAX_TICK_HISTORY:]
+            self.low_history = self.low_history[-self.MAX_TICK_HISTORY:]
+        
+        # Periodic memory cleanup tiap 100 ticks
+        if self.total_tick_count % self.MEMORY_CLEANUP_INTERVAL == 0:
+            self._perform_memory_cleanup()
+        
+        # Log memory usage setiap 100 ticks (throttled)
+        current_time = time.time()
+        if self.total_tick_count % self.MEMORY_CLEANUP_INTERVAL == 0 and current_time - self._last_memory_log_time >= 30:
+            self._log_memory_usage()
+            self._last_memory_log_time = current_time
+    
+    def _perform_memory_cleanup(self) -> None:
+        """
+        Perform periodic memory cleanup.
+        Clear old indicators jika tick_count > threshold.
+        """
+        try:
+            if self.total_tick_count > self.INDICATOR_RESET_THRESHOLD:
+                # Reset last indicators periodically untuk mencegah stale data
+                old_rsi = self.last_indicators.rsi
+                old_trend = self.last_indicators.trend_direction
+                
+                # Recalculate fresh indicators
+                fresh_indicators = self.calculate_all_indicators()
+                
+                logger.debug(
+                    f"🧹 Memory cleanup at tick {self.total_tick_count}: "
+                    f"RSI {old_rsi:.1f} -> {fresh_indicators.rsi:.1f}, "
+                    f"Trend {old_trend} -> {fresh_indicators.trend_direction}"
+                )
+        except Exception as e:
+            logger.warning(f"Memory cleanup error (non-critical): {e}")
+    
+    def _log_memory_usage(self) -> None:
+        """Log memory usage untuk monitoring"""
+        import sys
+        try:
+            tick_size = sys.getsizeof(self.tick_history)
+            high_size = sys.getsizeof(self.high_history)
+            low_size = sys.getsizeof(self.low_history)
+            total_size = tick_size + high_size + low_size
+            
+            logger.info(
+                f"📊 Memory stats @ tick {self.total_tick_count}: "
+                f"tick_history={len(self.tick_history)} items ({tick_size} bytes), "
+                f"total_buffer_size={total_size} bytes"
+            )
+        except Exception as e:
+            logger.debug(f"Memory logging error (non-critical): {e}")
             
     def clear_history(self) -> None:
         """Reset semua history"""

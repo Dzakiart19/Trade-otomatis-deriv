@@ -1,6 +1,6 @@
 """
 =============================================================
-TRADING MANAGER - Eksekusi & Money Management v2.0
+TRADING MANAGER - Eksekusi & Money Management v2.1
 =============================================================
 Modul ini menangani eksekusi trading, Martingale system,
 dan tracking hasil trading.
@@ -17,16 +17,25 @@ Enhancement v2.0:
 - SessionAnalytics class for performance tracking
 - Adaptive martingale based on rolling win rate
 - Improved risk management
+
+Enhancement v2.1:
+- Buy timeout detection (30 second timeout)
+- Circuit breaker for consecutive buy failures
+- Enhanced risk management with pre-flight validation
+- Session recovery mechanism (auto-save/restore)
+- Trade journal CSV validation with atomic writes
 =============================================================
 """
 
 import asyncio
 import logging
 import json
+import shutil
+import tempfile
 from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 
 from strategy import TradingStrategy, Signal, AnalysisResult
@@ -252,6 +261,23 @@ class TradingManager:
     RETRY_BASE_DELAY = 5.0
     RETRY_MAX_DELAY = 60.0
     
+    # Buy timeout and circuit breaker settings (Task 1)
+    BUY_RESPONSE_TIMEOUT = 30.0  # timeout dalam detik untuk buy response
+    CIRCUIT_BREAKER_FAILURES = 3  # jumlah consecutive failures untuk trigger circuit breaker
+    CIRCUIT_BREAKER_WINDOW = 60.0  # window dalam detik untuk menghitung consecutive failures
+    CIRCUIT_BREAKER_COOLDOWN = 120.0  # cooldown dalam detik setelah circuit breaker triggered
+    
+    # Enhanced risk management settings (Task 4)
+    MAX_TOTAL_RISK_PERCENT = 0.30  # auto-stop jika total risk > 30% balance
+    RISK_WARNING_PERCENT = 0.25  # warning jika mendekati risk limit
+    MARTINGALE_LOOK_AHEAD_LEVELS = 3  # check sampai martingale level 3
+    
+    # Session recovery settings (Task 5)
+    SESSION_RECOVERY_ENABLED = True
+    SESSION_SAVE_INTERVAL = 5  # save session setiap 5 trades
+    SESSION_RECOVERY_MAX_AGE = 3600  # restore jika bot restart dalam 1 jam (3600 detik)
+    SESSION_RECOVERY_FILE = "logs/session_recovery.json"
+    
     def __init__(self, deriv_ws: DerivWebSocket):
         """
         Inisialisasi Trading Manager.
@@ -282,10 +308,28 @@ class TradingManager:
         self.buy_retry_count: int = 0
         self.signal_processing_start_time: float = 0.0  # Untuk timeout detection
         
+        # Buy timeout tracking (Task 1)
+        self.buy_request_time: float = 0.0  # timestamp saat buy request dikirim
+        self._buy_timeout_task: Optional[asyncio.Task] = None
+        
+        # Circuit breaker tracking (Task 1)
+        self.buy_failure_times: List[float] = []  # timestamps of recent buy failures
+        self.circuit_breaker_active: bool = False
+        self.circuit_breaker_end_time: float = 0.0
+        
         # Risk Management
         self.consecutive_losses: int = 0
         self.session_start_date: str = ""
         self.daily_loss: float = 0.0
+        
+        # Session recovery tracking (Task 5)
+        self.session_recovery_enabled: bool = self.SESSION_RECOVERY_ENABLED
+        
+        # Progress notification tracking (Task 7)
+        self.last_progress_notification_time: float = 0.0
+        self.last_notified_milestone: int = -1  # Track last milestone to avoid duplicate
+        self.PROGRESS_MILESTONES = [0, 25, 50, 75, 100]  # Only notify at these milestones
+        self.MIN_PROGRESS_NOTIFICATION_INTERVAL = 10.0  # Minimum 10 seconds between notifications
         
         # Statistics
         self.stats = SessionStats()
@@ -383,46 +427,191 @@ class TradingManager:
             stats = self.strategy.get_stats()
             current_tick_count = stats['tick_count']
             
-            # Progress notification - kirim saat collecting data
-            # Send notification at first tick (immediate feedback) and every progress_interval
-            should_notify = (
-                current_tick_count <= self.required_ticks and 
-                (self.tick_count == 1 or self.tick_count % self.progress_interval == 0)
-            )
-            
-            if should_notify:
-                logger.info(f"📊 Progress notification triggered: tick_count={self.tick_count}, strategy_ticks={current_tick_count}")
-                if self.on_progress:
-                    rsi_value = stats['rsi'] if current_tick_count >= 15 else 0
-                    trend = stats['trend']
-                    logger.info(f"📊 Sending progress: {current_tick_count}/{self.required_ticks} ticks | RSI: {rsi_value} | Trend: {trend}")
-                    try:
-                        self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
-                        logger.info("✅ Progress callback executed successfully")
-                    except Exception as e:
-                        logger.error(f"❌ Error calling on_progress callback: {type(e).__name__}: {e}")
-                        import traceback
-                        logger.error(f"Traceback: {traceback.format_exc()}")
-                else:
-                    logger.warning("⚠️ on_progress callback is None - not registered!")
+            # Task 7: Progress notification optimization - milestone-based with time debouncing
+            # Only notify at milestones (0%, 25%, 50%, 75%, 100%) and max 1 per 10 seconds
+            if current_tick_count <= self.required_ticks:
+                progress_pct = int((current_tick_count / self.required_ticks) * 100)
+                
+                # Find the current milestone (0, 25, 50, 75, 100)
+                current_milestone = 0
+                for milestone in self.PROGRESS_MILESTONES:
+                    if progress_pct >= milestone:
+                        current_milestone = milestone
+                
+                # Always log progress for verbose debugging
+                rsi_value = stats['rsi'] if current_tick_count >= 15 else 0
+                trend = stats['trend']
+                logger.info(f"📊 Progress: {current_tick_count}/{self.required_ticks} ticks ({progress_pct}%) | RSI: {rsi_value} | Trend: {trend}")
+                
+                # Check if we should send notification (milestone-based + time debounce)
+                time_since_last_notification = current_time - self.last_progress_notification_time
+                is_new_milestone = current_milestone > self.last_notified_milestone
+                is_past_min_interval = time_since_last_notification >= self.MIN_PROGRESS_NOTIFICATION_INTERVAL
+                is_first_notification = self.last_progress_notification_time == 0.0
+                
+                should_notify = (
+                    is_new_milestone and 
+                    (is_first_notification or is_past_min_interval)
+                )
+                
+                if should_notify:
+                    logger.info(f"📊 Progress notification triggered: milestone={current_milestone}%, interval={time_since_last_notification:.1f}s")
+                    if self.on_progress:
+                        try:
+                            self.on_progress(current_tick_count, self.required_ticks, rsi_value, trend)
+                            self.last_progress_notification_time = current_time
+                            self.last_notified_milestone = current_milestone
+                            logger.info("✅ Progress callback executed successfully")
+                        except Exception as e:
+                            logger.error(f"❌ Error calling on_progress callback: {type(e).__name__}: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
+                    else:
+                        logger.warning("⚠️ on_progress callback is None - not registered!")
             
             self._check_and_execute_signal()
             
-    def _on_buy_response(self, data: dict):
-        """Handler untuk response buy contract"""
+    def _check_circuit_breaker(self) -> bool:
+        """
+        Check apakah circuit breaker aktif.
+        Returns True jika trading harus dihentikan, False jika boleh lanjut.
+        
+        Task 1: Circuit breaker jika 3 consecutive buy failures dalam 1 menit.
+        Fixed: Prune old entries sebelum check untuk rolling window yang benar.
+        """
         import time as time_module
+        current_time = time_module.time()
+        
+        # Prune old failure entries terlebih dahulu (rolling 60s window)
+        if self.buy_failure_times:
+            window_start = current_time - self.CIRCUIT_BREAKER_WINDOW
+            self.buy_failure_times = [t for t in self.buy_failure_times if t >= window_start]
+        
+        # Cek apakah masih dalam cooldown period
+        if self.circuit_breaker_active:
+            if current_time < self.circuit_breaker_end_time:
+                remaining = self.circuit_breaker_end_time - current_time
+                logger.warning(f"⚡ Circuit breaker active - {remaining:.1f}s remaining")
+                return True
+            else:
+                # Cooldown selesai, reset circuit breaker
+                logger.info("✅ Circuit breaker cooldown completed, resuming trading")
+                self.circuit_breaker_active = False
+                self.buy_failure_times.clear()
+                
+        return False
+    
+    def _record_buy_failure(self):
+        """
+        Record buy failure untuk circuit breaker tracking.
+        Trigger circuit breaker jika 3 failures dalam 1 menit.
+        """
+        import time as time_module
+        current_time = time_module.time()
+        
+        # Tambahkan failure time
+        self.buy_failure_times.append(current_time)
+        
+        # Remove old failures di luar window
+        window_start = current_time - self.CIRCUIT_BREAKER_WINDOW
+        self.buy_failure_times = [t for t in self.buy_failure_times if t >= window_start]
+        
+        logger.debug(f"Buy failures in window: {len(self.buy_failure_times)}/{self.CIRCUIT_BREAKER_FAILURES}")
+        
+        # Cek apakah perlu trigger circuit breaker
+        if len(self.buy_failure_times) >= self.CIRCUIT_BREAKER_FAILURES:
+            logger.error(
+                f"⚡ CIRCUIT BREAKER TRIGGERED: {len(self.buy_failure_times)} failures "
+                f"dalam {self.CIRCUIT_BREAKER_WINDOW}s window"
+            )
+            self.circuit_breaker_active = True
+            self.circuit_breaker_end_time = current_time + self.CIRCUIT_BREAKER_COOLDOWN
+            
+            if self.on_error:
+                self.on_error(
+                    f"Circuit breaker aktif! {len(self.buy_failure_times)}x buy gagal dalam 1 menit. "
+                    f"Trading pause {int(self.CIRCUIT_BREAKER_COOLDOWN)}s."
+                )
+            
+            self._log_error(
+                f"Circuit breaker triggered: {len(self.buy_failure_times)} failures, "
+                f"cooldown until {datetime.fromtimestamp(self.circuit_breaker_end_time).strftime('%H:%M:%S')}"
+            )
+            return True
+        
+        return False
+    
+    def _check_buy_timeout(self):
+        """
+        Check apakah buy request sudah timeout (30 detik).
+        Task 1: Auto-reset state ke RUNNING jika timeout tercapai.
+        """
+        import time as time_module
+        
+        if self.buy_request_time <= 0:
+            return False
+            
+        current_time = time_module.time()
+        elapsed = current_time - self.buy_request_time
+        
+        if elapsed >= self.BUY_RESPONSE_TIMEOUT:
+            logger.error(f"⏰ BUY TIMEOUT: No response after {elapsed:.1f}s (max: {self.BUY_RESPONSE_TIMEOUT}s)")
+            
+            self._log_error(f"Buy timeout after {elapsed:.1f}s")
+            
+            # Record sebagai failure untuk circuit breaker
+            self._record_buy_failure()
+            
+            # Reset state ke RUNNING
+            self.buy_request_time = 0.0
+            self.is_processing_signal = False
+            self.signal_processing_start_time = 0.0
+            self.state = TradingState.RUNNING
+            
+            if self.on_error:
+                self.on_error(f"Buy timeout setelah {int(elapsed)}s. Auto-reset state.")
+            
+            logger.info("🔄 State auto-reset ke RUNNING setelah buy timeout")
+            return True
+            
+        return False
+    
+    def _on_buy_response(self, data: dict):
+        """
+        Handler untuk response buy contract.
+        
+        Enhancement v2.1 (Task 1):
+        - Log detail error code dan message
+        - Circuit breaker tracking
+        - Buy timeout reset
+        """
+        import time as time_module
+        
+        # Reset buy request time karena sudah dapat response
+        self.buy_request_time = 0.0
         
         if "error" in data:
             error_msg = data["error"].get("message", "Unknown error")
             error_code = data["error"].get("code", "")
-            logger.error(f"❌ Buy failed [{error_code}]: {error_msg}")
+            error_details = json.dumps(data["error"], indent=2)
             
-            # Log error ke file
-            self._log_error(f"Buy Error [{error_code}]: {error_msg}")
+            logger.error(f"❌ Buy failed [{error_code}]: {error_msg}")
+            logger.debug(f"Full error details: {error_details}")
+            
+            # Log error ke file dengan detail lengkap
+            self._log_error(f"Buy Error [{error_code}]: {error_msg}\nDetails: {error_details}")
             
             # Reset processing flags
             self.is_processing_signal = False
             self.signal_processing_start_time = 0.0
+            
+            # Record failure untuk circuit breaker
+            circuit_breaker_triggered = self._record_buy_failure()
+            
+            # Jika circuit breaker triggered, stop sementara
+            if circuit_breaker_triggered:
+                self.state = TradingState.RUNNING  # Akan di-block oleh circuit breaker check
+                return
             
             # Increment retry counter
             self.buy_retry_count += 1
@@ -452,9 +641,10 @@ class TradingManager:
             # Reset state untuk coba lagi
             self.state = TradingState.RUNNING
             return
-            
-        # SUCCESS: Reset retry counter
+        
+        # SUCCESS: Reset counters
         self.buy_retry_count = 0
+        self.buy_failure_times.clear()  # Reset failure tracking on success
         
         buy_info = data.get("buy", {})
         self.current_contract_id = str(buy_info.get("contract_id", ""))
@@ -622,6 +812,11 @@ class TradingManager:
         # Reset processing flags SEBELUM cek target
         self.is_processing_signal = False
         self.signal_processing_start_time = 0.0
+        
+        # Task 5: Save session recovery setiap SESSION_SAVE_INTERVAL trades
+        if self.session_recovery_enabled and self.stats.total_trades > 0:
+            if self.stats.total_trades % self.SESSION_SAVE_INTERVAL == 0:
+                self._save_session_recovery()
             
         # Cek apakah target tercapai
         if self.target_trades > 0 and self.stats.total_trades >= self.target_trades:
@@ -638,6 +833,9 @@ class TradingManager:
         self.is_processing_signal = False
         
         logger.info(f"🏁 Session complete! Total profit: ${self.stats.total_profit:.2f}")
+        
+        # Task 5: Clear session recovery file setelah session selesai normal
+        self._clear_session_recovery()
         
         # Save session summary to file
         self._save_session_summary()
@@ -684,45 +882,325 @@ class TradingManager:
         except Exception as e:
             logger.error(f"Failed to write error log: {e}")
     
+    def _save_session_recovery(self):
+        """
+        Auto-save session stats ke JSON file untuk recovery.
+        Task 5: Session Recovery Mechanism.
+        Dipanggil setiap SESSION_SAVE_INTERVAL trades.
+        """
+        if not self.session_recovery_enabled:
+            return
+            
+        try:
+            import time as time_module
+            recovery_data = {
+                "save_timestamp": time_module.time(),
+                "save_datetime": datetime.now().isoformat(),
+                "symbol": self.symbol,
+                "base_stake": self.base_stake,
+                "current_stake": self.current_stake,
+                "duration": self.duration,
+                "duration_unit": self.duration_unit,
+                "target_trades": self.target_trades,
+                "stats": {
+                    "total_trades": self.stats.total_trades,
+                    "wins": self.stats.wins,
+                    "losses": self.stats.losses,
+                    "total_profit": self.stats.total_profit,
+                    "starting_balance": self.stats.starting_balance,
+                    "current_balance": self.stats.current_balance,
+                    "highest_balance": self.stats.highest_balance,
+                    "lowest_balance": self.stats.lowest_balance
+                },
+                "martingale_level": self.martingale_level,
+                "in_martingale_sequence": self.in_martingale_sequence,
+                "consecutive_losses": self.consecutive_losses,
+                "daily_loss": self.daily_loss,
+                "session_start_date": self.session_start_date
+            }
+            
+            recovery_file = self.SESSION_RECOVERY_FILE
+            
+            os.makedirs(os.path.dirname(recovery_file), exist_ok=True)
+            
+            temp_file = recovery_file + ".tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(recovery_data, f, indent=2, default=str)
+            
+            shutil.move(temp_file, recovery_file)
+            
+            logger.info(f"💾 Session recovery saved: {self.stats.total_trades} trades, "
+                       f"profit: ${self.stats.total_profit:.2f}")
+                       
+        except Exception as e:
+            logger.error(f"Failed to save session recovery: {e}")
+            self._log_error(f"Session recovery save failed: {e}")
+    
+    def _restore_session_recovery(self) -> bool:
+        """
+        Restore session data dari recovery file jika bot restart dalam 1 jam.
+        Task 5: Session Recovery Mechanism.
+        
+        Returns:
+            True jika session berhasil di-restore, False jika tidak
+        """
+        if not self.session_recovery_enabled:
+            logger.info("📂 Session recovery disabled")
+            return False
+            
+        recovery_file = self.SESSION_RECOVERY_FILE
+        
+        if not os.path.exists(recovery_file):
+            logger.info("📂 No session recovery file found - starting fresh")
+            return False
+            
+        try:
+            import time as time_module
+            
+            with open(recovery_file, 'r', encoding='utf-8') as f:
+                recovery_data = json.load(f)
+            
+            save_timestamp = recovery_data.get("save_timestamp", 0)
+            current_time = time_module.time()
+            age_seconds = current_time - save_timestamp
+            
+            if age_seconds > self.SESSION_RECOVERY_MAX_AGE:
+                logger.info(f"📂 Session recovery file expired (age: {age_seconds:.0f}s > max: {self.SESSION_RECOVERY_MAX_AGE}s)")
+                self._clear_session_recovery()
+                return False
+            
+            self.symbol = recovery_data.get("symbol", DEFAULT_SYMBOL)
+            self.base_stake = recovery_data.get("base_stake", MIN_STAKE_GLOBAL)
+            self.current_stake = recovery_data.get("current_stake", MIN_STAKE_GLOBAL)
+            self.duration = recovery_data.get("duration", 5)
+            self.duration_unit = recovery_data.get("duration_unit", "t")
+            self.target_trades = recovery_data.get("target_trades", 0)
+            
+            stats_data = recovery_data.get("stats", {})
+            self.stats.total_trades = stats_data.get("total_trades", 0)
+            self.stats.wins = stats_data.get("wins", 0)
+            self.stats.losses = stats_data.get("losses", 0)
+            self.stats.total_profit = stats_data.get("total_profit", 0.0)
+            self.stats.starting_balance = stats_data.get("starting_balance", 0.0)
+            self.stats.current_balance = stats_data.get("current_balance", 0.0)
+            self.stats.highest_balance = stats_data.get("highest_balance", 0.0)
+            self.stats.lowest_balance = stats_data.get("lowest_balance", 0.0)
+            
+            self.martingale_level = recovery_data.get("martingale_level", 0)
+            self.in_martingale_sequence = recovery_data.get("in_martingale_sequence", False)
+            self.consecutive_losses = recovery_data.get("consecutive_losses", 0)
+            self.daily_loss = recovery_data.get("daily_loss", 0.0)
+            self.session_start_date = recovery_data.get("session_start_date", "")
+            
+            logger.info(f"🔄 Session RECOVERED from {recovery_data.get('save_datetime', 'unknown')}!")
+            logger.info(f"   Symbol: {self.symbol}, Stake: ${self.current_stake:.2f}")
+            logger.info(f"   Stats: {self.stats.total_trades} trades, "
+                       f"{self.stats.wins}W/{self.stats.losses}L, "
+                       f"profit: ${self.stats.total_profit:.2f}")
+            logger.info(f"   Martingale Level: {self.martingale_level}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to restore session recovery: {e}")
+            self._log_error(f"Session recovery restore failed: {e}")
+            return False
+    
+    def _clear_session_recovery(self):
+        """
+        Clear recovery file setelah session selesai normal.
+        Task 5: Session Recovery Mechanism.
+        """
+        try:
+            recovery_file = self.SESSION_RECOVERY_FILE
+            if os.path.exists(recovery_file):
+                os.remove(recovery_file)
+                logger.info("🗑️ Session recovery file cleared")
+        except Exception as e:
+            logger.warning(f"Failed to clear session recovery file: {e}")
+    
+    def _validate_csv_integrity(self, filepath: str) -> bool:
+        """
+        Validate CSV file integrity sebelum append.
+        Task 9: CSV validation.
+        
+        Returns:
+            True jika file valid, False jika corrupt
+        """
+        if not os.path.exists(filepath):
+            return True  # File baru, dianggap valid
+            
+        try:
+            with open(filepath, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                
+                expected_header = [
+                    "timestamp", "trade_number", "symbol", "type", 
+                    "entry_price", "exit_price", "stake", "payout", 
+                    "profit", "is_win", "rsi", "trend"
+                ]
+                
+                if header != expected_header:
+                    logger.warning(f"⚠️ CSV header mismatch. Expected: {expected_header}, Got: {header}")
+                    return False
+                
+                # Count records untuk validation
+                record_count = sum(1 for _ in reader)
+                logger.debug(f"CSV validation: {record_count} records found")
+                
+            return True
+        except Exception as e:
+            logger.error(f"CSV validation error: {e}")
+            return False
+    
+    def _repair_csv_header(self, filepath: str):
+        """
+        Auto-repair header jika missing.
+        Task 9: CSV validation.
+        """
+        expected_header = [
+            "timestamp", "trade_number", "symbol", "type", 
+            "entry_price", "exit_price", "stake", "payout", 
+            "profit", "is_win", "rsi", "trend"
+        ]
+        
+        try:
+            # Read existing content
+            existing_content = []
+            if os.path.exists(filepath):
+                with open(filepath, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    
+                    # Skip existing header if different
+                    if header != expected_header:
+                        # Check if header looks like data (not header)
+                        if header and len(header) == len(expected_header):
+                            try:
+                                # Try to parse first field as timestamp
+                                datetime.strptime(header[0], "%Y-%m-%d %H:%M:%S")
+                                # This is data, not header - include it
+                                existing_content.append(header)
+                            except ValueError:
+                                pass  # It's a bad header, skip it
+                    
+                    existing_content.extend(list(reader))
+            
+            # Write with correct header
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(expected_header)
+                writer.writerows(existing_content)
+                
+            logger.info(f"✅ CSV header repaired: {filepath}")
+        except Exception as e:
+            logger.error(f"CSV header repair failed: {e}")
+    
+    def _backup_csv_if_needed(self, filepath: str, max_records: int = 100):
+        """
+        Backup CSV file sebelum write jika >100 records.
+        Task 9: CSV validation.
+        """
+        if not os.path.exists(filepath):
+            return
+            
+        try:
+            with open(filepath, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Skip header
+                record_count = sum(1 for _ in reader)
+            
+            if record_count >= max_records:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_path = filepath.replace('.csv', f'_backup_{timestamp}.csv')
+                shutil.copy2(filepath, backup_path)
+                logger.info(f"📁 CSV backup created: {backup_path} ({record_count} records)")
+        except Exception as e:
+            logger.warning(f"CSV backup failed (non-critical): {e}")
+    
     def _log_trade_to_journal(self, trade: TradeResult):
-        """Log trade ke CSV journal untuk analisis"""
+        """
+        Log trade ke CSV journal untuk analisis.
+        
+        Enhancement v2.1 (Task 9):
+        - Validate CSV file integrity sebelum append
+        - Backup file sebelum write jika >100 records
+        - Use atomic write dengan temp file + rename
+        - Auto-repair header jika missing
+        """
         try:
             journal_file = os.path.join(LOGS_DIR, f"trades_{datetime.now().strftime('%Y%m%d')}.csv")
             file_exists = os.path.exists(journal_file)
             
-            with open(journal_file, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
+            # Task 9: Validate CSV integrity
+            if file_exists and not self._validate_csv_integrity(journal_file):
+                logger.warning("⚠️ CSV integrity check failed, attempting repair...")
+                self._repair_csv_header(journal_file)
+            
+            # Task 9: Backup if needed
+            if file_exists:
+                self._backup_csv_if_needed(journal_file)
+            
+            # Get current RSI and trend
+            stats = self.strategy.get_stats()
+            
+            # Task 9: Atomic write dengan temp file + rename
+            temp_file = None
+            try:
+                # Create temp file in same directory
+                fd, temp_file = tempfile.mkstemp(suffix='.csv', dir=LOGS_DIR)
+                os.close(fd)
                 
-                # Write header jika file baru
-                if not file_exists:
+                # Copy existing content to temp file
+                if file_exists:
+                    shutil.copy2(journal_file, temp_file)
+                
+                # Append new trade to temp file
+                with open(temp_file, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    
+                    # Write header jika file baru
+                    if not file_exists:
+                        writer.writerow([
+                            "timestamp", "trade_number", "symbol", "type", 
+                            "entry_price", "exit_price", "stake", "payout", 
+                            "profit", "is_win", "rsi", "trend"
+                        ])
+                    
+                    # Write trade data
                     writer.writerow([
-                        "timestamp", "trade_number", "symbol", "type", 
-                        "entry_price", "exit_price", "stake", "payout", 
-                        "profit", "is_win", "rsi", "trend"
+                        trade.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                        trade.trade_number,
+                        self.symbol,
+                        trade.contract_type,
+                        trade.entry_price,
+                        trade.exit_price,
+                        trade.stake,
+                        trade.payout,
+                        trade.profit,
+                        "WIN" if trade.is_win else "LOSS",
+                        stats.get("rsi", 0),
+                        stats.get("trend", "N/A")
                     ])
                 
-                # Get current RSI and trend
-                stats = self.strategy.get_stats()
+                # Atomic rename
+                shutil.move(temp_file, journal_file)
+                temp_file = None  # Mark as successfully moved
                 
-                # Write trade data
-                writer.writerow([
-                    trade.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                    trade.trade_number,
-                    self.symbol,
-                    trade.contract_type,
-                    trade.entry_price,
-                    trade.exit_price,
-                    trade.stake,
-                    trade.payout,
-                    trade.profit,
-                    "WIN" if trade.is_win else "LOSS",
-                    stats.get("rsi", 0),
-                    stats.get("trend", "N/A")
-                ])
+                logger.info(f"📝 Trade logged to journal (atomic): {journal_file}")
                 
-            logger.info(f"📝 Trade logged to journal: {journal_file}")
+            finally:
+                # Cleanup temp file jika masih ada (gagal rename)
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                        
         except Exception as e:
             logger.error(f"Failed to log trade to journal: {e}")
+            self._log_error(f"Journal write failed: {e}")
     
     def _save_session_summary(self):
         """Simpan ringkasan session ke file"""
@@ -768,6 +1246,17 @@ class TradingManager:
         if self.is_processing_signal:
             logger.debug("Signal processing already in progress, skipping...")
             return
+        
+        # Task 1 FIX: Check circuit breaker sebelum analyze signal
+        if self._check_circuit_breaker():
+            logger.debug("Circuit breaker active, skipping signal check")
+            return
+        
+        # Task 1 FIX: Check apakah ada pending buy timeout
+        if self._check_buy_timeout():
+            # State sudah di-reset oleh _check_buy_timeout
+            logger.debug("Buy timeout detected, state reset")
+            return
             
         # Dapatkan analisis dari strategy
         analysis = self.strategy.analyze()
@@ -788,13 +1277,125 @@ class TradingManager:
         
         self._execute_trade(contract_type)
         
+    def _calculate_martingale_projection(self, levels: int = 3) -> float:
+        """
+        Hitung projected total stake jika Martingale sampai level tertentu.
+        Task 4: Check jika projected Martingale stake level 3 masih dalam balance.
+        
+        Args:
+            levels: Jumlah level Martingale ke depan
+            
+        Returns:
+            Total projected stake untuk semua level
+        """
+        multiplier = self._get_adaptive_martingale_multiplier()
+        total_stake = 0.0
+        current_projected_stake = self.current_stake
+        
+        for level in range(levels):
+            total_stake += current_projected_stake
+            current_projected_stake = round(current_projected_stake * multiplier, 2)
+            
+        return total_stake
+    
+    def _calculate_total_exposure(self) -> float:
+        """
+        Hitung total exposure jika semua pending trades loss.
+        Task 4: Enhanced risk management.
+        Fixed: Use fresh balance from WebSocket instead of stale stats.
+        
+        Returns:
+            Total potential loss
+        """
+        # Current stake + projected martingale losses
+        projected_loss = self._calculate_martingale_projection(self.MARTINGALE_LOOK_AHEAD_LEVELS)
+        
+        # Get fresh balance dari WebSocket (bukan stats yang mungkin stale)
+        current_balance = self.ws.get_balance() if self.ws else self.stats.current_balance
+        
+        # Tambahkan current unrealized loss jika ada
+        current_loss = self.stats.starting_balance - current_balance if self.stats.starting_balance > 0 else 0
+        
+        return projected_loss + max(0, current_loss)
+    
+    def _perform_preflight_risk_check(self, current_balance: float) -> tuple[bool, str]:
+        """
+        Perform pre-flight risk validation sebelum execute trade.
+        Task 4: Enhanced Risk Management Validation.
+        Fixed: Query latest balance dari WebSocket untuk accuracy.
+        
+        Returns:
+            Tuple (is_safe, message)
+        """
+        # Get fresh balance dari WebSocket untuk accuracy
+        fresh_balance = self.ws.get_balance() if self.ws else current_balance
+        if fresh_balance != current_balance:
+            logger.debug(f"Balance refreshed: ${current_balance:.2f} -> ${fresh_balance:.2f}")
+            current_balance = fresh_balance
+        
+        # Check 1: Martingale level 3 projection
+        projected_total = self._calculate_martingale_projection(self.MARTINGALE_LOOK_AHEAD_LEVELS)
+        if projected_total > current_balance:
+            msg = (
+                f"Martingale level {self.MARTINGALE_LOOK_AHEAD_LEVELS} projected stake "
+                f"(${projected_total:.2f}) melebihi balance (${current_balance:.2f})"
+            )
+            logger.warning(f"⚠️ Risk check warning: {msg}")
+            # Ini warning, bukan blocking
+        
+        # Check 2: Total exposure calculation
+        total_exposure = self._calculate_total_exposure()
+        exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
+        
+        # Check 3: Auto-stop jika total risk > 30% balance
+        max_risk = current_balance * self.MAX_TOTAL_RISK_PERCENT
+        if total_exposure > max_risk:
+            msg = (
+                f"Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
+                f"melebihi limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}% (${max_risk:.2f})"
+            )
+            logger.error(f"🛑 Risk limit exceeded: {msg}")
+            return False, msg
+        
+        # Check 4: Warning jika mendekati risk limit
+        warning_threshold = current_balance * self.RISK_WARNING_PERCENT
+        if total_exposure > warning_threshold:
+            msg = (
+                f"⚠️ RISK WARNING: Total exposure ${total_exposure:.2f} ({exposure_percent:.1f}%) "
+                f"mendekati limit {self.MAX_TOTAL_RISK_PERCENT*100:.0f}%"
+            )
+            logger.warning(msg)
+            
+            if self.on_error:
+                self.on_error(msg)
+        
+        return True, "Risk check passed"
+    
     def _execute_trade(self, contract_type: str):
         """
         Eksekusi trade dengan parameter yang sudah diset.
         
+        Enhancement v2.1:
+        - Pre-flight risk validation (Task 4)
+        - Buy timeout tracking (Task 1)
+        - Circuit breaker check (Task 1)
+        
         Args:
             contract_type: "CALL" atau "PUT"
         """
+        import time as time_module
+        
+        # Check circuit breaker terlebih dahulu
+        if self._check_circuit_breaker():
+            self.state = TradingState.RUNNING
+            self.is_processing_signal = False
+            return
+        
+        # Check buy timeout dari request sebelumnya
+        if self._check_buy_timeout():
+            # State sudah di-reset oleh _check_buy_timeout
+            return
+        
         # Set state SEBELUM buy untuk mencegah race condition
         self.state = TradingState.WAITING_RESULT
         self.current_trade_type = contract_type
@@ -806,6 +1407,17 @@ class TradingManager:
             self.current_stake = min_stake
         
         current_balance = self.ws.get_balance()
+        
+        # ENHANCED RISK CHECK (Task 4): Pre-flight validation
+        is_safe, risk_msg = self._perform_preflight_risk_check(current_balance)
+        if not is_safe:
+            logger.error(f"🛑 Pre-flight risk check failed: {risk_msg}")
+            if self.on_error:
+                self.on_error(f"Trading dihentikan! {risk_msg}")
+            self.is_processing_signal = False
+            self.signal_processing_start_time = 0.0
+            self._complete_session()
+            return
         
         # RISK CHECK 1: Cek balance cukup
         if self.current_stake > current_balance:
@@ -843,7 +1455,10 @@ class TradingManager:
         projected_next_stake = self.current_stake * multiplier
         if projected_next_stake > current_balance:
             logger.warning(f"⚠️ Balance mungkin tidak cukup untuk Martingale! Next stake: ${projected_next_stake:.2f}, Balance: ${current_balance:.2f}")
-            
+        
+        # Record buy request time untuk timeout tracking (Task 1)
+        self.buy_request_time = time_module.time()
+        
         # Eksekusi buy
         success = self.ws.buy_contract(
             contract_type=contract_type,
@@ -855,6 +1470,8 @@ class TradingManager:
         
         if not success:
             logger.error("Failed to send buy request")
+            self.buy_request_time = 0.0  # Reset timeout tracking
+            self._record_buy_failure()  # Record untuk circuit breaker
             self.state = TradingState.RUNNING
             self.is_processing_signal = False
             
@@ -926,22 +1543,39 @@ class TradingManager:
             logger.warning(f"⚠️ Base stake ${self.base_stake} dibawah minimum. Disesuaikan ke ${min_stake}")
             self.base_stake = min_stake
         
-        # Reset stats untuk session baru
-        self.stats = SessionStats()
-        self.stats.starting_balance = self.ws.get_balance()
-        self.stats.current_balance = self.stats.starting_balance
-        self.stats.highest_balance = self.stats.starting_balance
-        self.stats.lowest_balance = self.stats.starting_balance
-        self.trade_history.clear()
+        # Task 5: Try to restore session if recovery file exists
+        session_restored = self._restore_session_recovery()
         
-        # Reset stake ke base
-        self.current_stake = self.base_stake
+        if not session_restored:
+            # Reset stats untuk session baru jika tidak ada recovery
+            self.stats = SessionStats()
+            self.stats.starting_balance = self.ws.get_balance()
+            self.stats.current_balance = self.stats.starting_balance
+            self.stats.highest_balance = self.stats.starting_balance
+            self.stats.lowest_balance = self.stats.starting_balance
+            self.trade_history.clear()
+            
+            # Reset stake ke base
+            self.current_stake = self.base_stake
+        else:
+            # Update current balance from websocket
+            current_balance = self.ws.get_balance()
+            self.stats.current_balance = current_balance
+            if current_balance > self.stats.highest_balance:
+                self.stats.highest_balance = current_balance
+            if current_balance < self.stats.lowest_balance:
+                self.stats.lowest_balance = current_balance
         
         # Reset tick counter untuk progress tracking
         self.tick_count = 0
         
-        # Reset risk management counters
-        self.consecutive_losses = 0
+        # Reset progress notification tracking (Task 7)
+        self.last_progress_notification_time = 0.0
+        self.last_notified_milestone = -1
+        
+        # Reset risk management counters (hanya jika tidak ada recovery)
+        if not session_restored:
+            self.consecutive_losses = 0
         self.is_processing_signal = False
         self.signal_processing_start_time = 0.0
         self.last_trade_time = 0.0

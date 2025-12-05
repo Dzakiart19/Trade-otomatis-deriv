@@ -16,11 +16,15 @@ Commands:
 """
 
 import os
+import sys
+import signal
+import time
 import asyncio
 import logging
 import threading
 import requests
 from typing import Optional
+from datetime import datetime
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -60,6 +64,9 @@ logger = logging.getLogger(__name__)
 deriv_ws: Optional[DerivWebSocket] = None
 trading_manager: Optional[TradingManager] = None
 active_chat_id: Optional[int] = None
+shutdown_requested: bool = False
+last_progress_notification_time: float = 0.0
+MIN_NOTIFICATION_INTERVAL: float = 10.0
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,10 +649,40 @@ def escape_markdown(text: str) -> str:
     return text
 
 
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escape karakter khusus untuk Telegram MarkdownV2.
+    Ini lebih komprehensif dari escape_markdown() dan menjaga formatting.
+    """
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
+    result = text
+    for char in special_chars:
+        result = result.replace(char, f'\\{char}')
+    return result
+
+
+def log_telegram_error(message: str, error: str):
+    """Log failed Telegram messages to file for debugging"""
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/telegram_errors.log", "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] Error: {error}\n")
+            f.write(f"[{timestamp}] Message: {message[:200]}...\n" if len(message) > 200 else f"[{timestamp}] Message: {message}\n")
+            f.write("-" * 50 + "\n")
+    except Exception as e:
+        logger.error(f"Failed to log telegram error: {e}")
+
+
 def send_telegram_message_sync(token: str, message: str, use_html: bool = False):
     """
     Helper synchronous untuk kirim pesan ke Telegram dari thread lain.
     Menggunakan requests library untuk menghindari masalah asyncio event loop.
+    
+    Features:
+    - Retry dengan exponential backoff (max 3x)
+    - Fallback ke plain text jika Markdown gagal 2x
+    - Log failed messages ke file
     
     Args:
         token: Bot token
@@ -656,47 +693,78 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
     if not active_chat_id:
         logger.warning("No active chat_id, cannot send message")
         return False
-        
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        
-        # Coba kirim dengan parse mode
-        parse_mode = "HTML" if use_html else "Markdown"
-        payload = {
-            "chat_id": active_chat_id,
-            "text": message,
-            "parse_mode": parse_mode
-        }
-        response = requests.post(url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            logger.debug(f"Message sent successfully to chat {active_chat_id}")
-            return True
-        else:
-            # Jika gagal dengan Markdown, coba tanpa parse mode
-            logger.warning(f"Failed to send with {parse_mode}, trying plain text")
-            payload_plain = {
-                "chat_id": active_chat_id,
-                "text": message.replace('**', '').replace('*', '').replace('`', '')
-            }
-            response_plain = requests.post(url, json=payload_plain, timeout=10)
-            
-            if response_plain.status_code == 200:
-                logger.debug(f"Message sent as plain text to chat {active_chat_id}")
-                return True
+    
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    parse_mode = "HTML" if use_html else "Markdown"
+    max_retries = 3
+    markdown_failures = 0
+    
+    for attempt in range(max_retries):
+        try:
+            if markdown_failures >= 2:
+                payload = {
+                    "chat_id": active_chat_id,
+                    "text": message.replace('**', '').replace('*', '').replace('`', '').replace('_', '')
+                }
             else:
-                logger.error(f"Failed to send message: {response_plain.text}")
-                return False
+                payload = {
+                    "chat_id": active_chat_id,
+                    "text": message,
+                    "parse_mode": parse_mode
+                }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.debug(f"Message sent successfully to chat {active_chat_id}")
+                return True
+            elif response.status_code == 400:
+                response_data = response.json()
+                error_desc = response_data.get('description', 'Unknown error')
                 
-    except requests.exceptions.Timeout:
-        logger.error("Telegram API timeout")
-        return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error sending Telegram message: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error sending Telegram message: {e}")
-        return False
+                if 'can\'t parse entities' in error_desc.lower() or 'bad request' in error_desc.lower():
+                    markdown_failures += 1
+                    logger.warning(f"Markdown parse error (attempt {attempt + 1}/{max_retries}): {error_desc}")
+                    
+                    if markdown_failures >= 2:
+                        logger.info("Falling back to plain text mode")
+                        continue
+                else:
+                    logger.error(f"Telegram API error: {error_desc}")
+                    log_telegram_error(message, error_desc)
+                    
+            elif response.status_code == 429:
+                retry_after = response.json().get('parameters', {}).get('retry_after', 5)
+                logger.warning(f"Rate limited, waiting {retry_after}s...")
+                time.sleep(retry_after)
+                continue
+            else:
+                logger.error(f"Telegram API error {response.status_code}: {response.text}")
+                log_telegram_error(message, f"Status {response.status_code}: {response.text}")
+            
+            backoff_time = (2 ** attempt) * 0.5
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {backoff_time}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(backoff_time)
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"Telegram API timeout (attempt {attempt + 1}/{max_retries})")
+            log_telegram_error(message, "Request timeout")
+            if attempt < max_retries - 1:
+                time.sleep((2 ** attempt) * 0.5)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error (attempt {attempt + 1}/{max_retries}): {e}")
+            log_telegram_error(message, str(e))
+            if attempt < max_retries - 1:
+                time.sleep((2 ** attempt) * 0.5)
+        except Exception as e:
+            logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {e}")
+            log_telegram_error(message, str(e))
+            if attempt < max_retries - 1:
+                time.sleep((2 ** attempt) * 0.5)
+    
+    logger.error("All retry attempts failed for Telegram message")
+    return False
 
 
 def setup_trading_callbacks(telegram_token: str):
@@ -769,7 +837,16 @@ def setup_trading_callbacks(telegram_token: str):
     
     def on_progress(tick_count: int, required_ticks: int, rsi: float, trend: str):
         """Callback untuk progress notification saat mengumpulkan data"""
+        global last_progress_notification_time
+        
         logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}")
+        
+        current_time = time.time()
+        time_since_last = current_time - last_progress_notification_time
+        
+        if time_since_last < MIN_NOTIFICATION_INTERVAL:
+            logger.debug(f"Skipping progress notification (debounce: {time_since_last:.1f}s < {MIN_NOTIFICATION_INTERVAL}s)")
+            return
         
         if rsi > 0:
             rsi_text = f"{rsi:.1f}"
@@ -790,6 +867,7 @@ def setup_trading_callbacks(telegram_token: str):
         
         result = send_telegram_message_sync(telegram_token, message)
         if result:
+            last_progress_notification_time = current_time
             logger.info(f"✅ Progress message sent successfully")
         else:
             logger.error(f"❌ Failed to send progress message")
@@ -799,6 +877,60 @@ def setup_trading_callbacks(telegram_token: str):
     trading_manager.on_session_complete = on_session_complete
     trading_manager.on_error = on_error
     trading_manager.on_progress = on_progress
+
+
+def shutdown_handler(signum, frame):
+    """
+    Graceful shutdown handler untuk SIGTERM dan SIGINT.
+    Menunggu trade aktif selesai dan menyimpan session data.
+    """
+    global shutdown_requested, deriv_ws, trading_manager
+    
+    signal_name = signal.Signals(signum).name if hasattr(signal.Signals, 'name') else str(signum)
+    logger.info(f"🛑 Received shutdown signal: {signal_name}")
+    
+    shutdown_requested = True
+    
+    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if telegram_token and active_chat_id:
+        send_telegram_message_sync(telegram_token, "🛑 **Bot shutting down gracefully...**")
+    
+    if trading_manager:
+        from trading import TradingState
+        
+        if trading_manager.state in [TradingState.TRADING, TradingState.WAITING]:
+            logger.info("⏳ Waiting for active trade to complete (max 5 minutes)...")
+            
+            max_wait = 300
+            wait_interval = 5
+            elapsed = 0
+            
+            while elapsed < max_wait:
+                if trading_manager.state not in [TradingState.TRADING, TradingState.WAITING]:
+                    logger.info("✅ Active trade completed")
+                    break
+                time.sleep(wait_interval)
+                elapsed += wait_interval
+                logger.info(f"⏳ Still waiting... ({elapsed}s / {max_wait}s)")
+            
+            if elapsed >= max_wait:
+                logger.warning("⚠️ Timeout waiting for trade completion, forcing stop")
+        
+        result = trading_manager.stop()
+        logger.info(f"Trading manager stopped: {result}")
+    
+    if deriv_ws:
+        try:
+            deriv_ws.disconnect()
+            logger.info("✅ WebSocket disconnected")
+        except Exception as e:
+            logger.error(f"Error disconnecting WebSocket: {e}")
+    
+    if telegram_token and active_chat_id:
+        send_telegram_message_sync(telegram_token, "✅ **Bot shutdown complete.**")
+    
+    logger.info("🏁 Graceful shutdown complete")
+    sys.exit(0)
 
 
 def initialize_deriv():
@@ -873,6 +1005,10 @@ def main():
         logger.error("❌ TELEGRAM_BOT_TOKEN not found!")
         logger.info("Please set TELEGRAM_BOT_TOKEN in Replit Secrets")
         return
+    
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+    logger.info("✅ Signal handlers registered (SIGTERM, SIGINT)")
         
     start_keep_alive()
     initialize_deriv()

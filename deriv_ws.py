@@ -62,12 +62,14 @@ class DerivWebSocket:
     # Authorization retry settings
     MAX_AUTH_RETRIES = 3
     AUTH_RETRY_DELAY = 2  # detik base
-    AUTH_TIMEOUT = 15  # detik timeout untuk menunggu auth response
+    AUTH_TIMEOUT = 30  # detik timeout untuk menunggu auth response (increased from 15)
     
     # Health check settings
     HEALTH_CHECK_INTERVAL = 30  # detik
-    PING_TIMEOUT = 60  # detik - lebih toleran untuk network latency
-    MAX_MISSED_PONGS = 2  # jumlah pong yang boleh terlewat sebelum reconnect
+    PING_TIMEOUT = 90  # detik - lebih toleran untuk network latency (increased from 60)
+    MAX_MISSED_PONGS = 3  # jumlah pong yang boleh terlewat sebelum reconnect (increased from 2)
+    GRACE_PERIOD_SECONDS = 10  # grace period sebelum force reconnect
+    PING_JITTER_MAX = 5  # maksimum jitter dalam detik untuk menghindari collision
     
     def __init__(self, demo_token: str, real_token: str):
         """
@@ -468,7 +470,21 @@ class DerivWebSocket:
             self._auth_event.set()
             
     def _authorize_with_retry(self):
-        """Authorize dengan retry mechanism"""
+        """
+        Authorize dengan retry mechanism.
+        
+        Enhancement v2.1:
+        - Clear pending subscriptions sebelum re-authorize
+        - Connection state validation
+        """
+        # Clear pending subscriptions sebelum authorize
+        self._clear_pending_subscriptions()
+        
+        # Validate connection state
+        if not self.is_connected:
+            logger.warning("⚠️ Cannot authorize - not connected")
+            return
+        
         self.auth_retry_count = 0
         self._auth_event.clear()
         self._auth_success = False
@@ -483,42 +499,86 @@ class DerivWebSocket:
         self._send(payload)
         
     def _start_health_check(self):
-        """Start health check thread untuk monitoring koneksi"""
+        """
+        Start health check thread untuk monitoring koneksi.
+        
+        Enhancement v2.1:
+        - Tambahkan jitter pada ping interval untuk menghindari collision
+        - Grace period sebelum force reconnect
+        - Log lebih detail untuk debugging ping/pong cycle
+        """
+        import random
+        
         self._stop_health_check = False
         self._missed_pong_count = 0
+        self._grace_period_start = None
         
         def health_check_loop():
             while not self._stop_health_check and self.is_connected:
                 try:
-                    time.sleep(self.HEALTH_CHECK_INTERVAL)
+                    # Tambahkan jitter untuk menghindari collision (0 to PING_JITTER_MAX seconds)
+                    jitter = random.uniform(0, self.PING_JITTER_MAX)
+                    sleep_time = self.HEALTH_CHECK_INTERVAL + jitter
+                    logger.debug(f"🏥 Health check sleeping for {sleep_time:.1f}s (interval={self.HEALTH_CHECK_INTERVAL}s, jitter={jitter:.1f}s)")
+                    
+                    time.sleep(sleep_time)
                     
                     if not self.is_connected:
+                        logger.debug("Health check: connection lost, exiting loop")
                         break
                         
+                    current_time = time.time()
+                    time_since_pong = current_time - self._last_pong_time
+                    
                     # Check if previous ping was answered
                     if self._awaiting_pong:
                         self._missed_pong_count += 1
-                        logger.warning(f"⚠️ Missed pong #{self._missed_pong_count} (max: {self.MAX_MISSED_PONGS})")
+                        logger.warning(
+                            f"⚠️ Missed pong #{self._missed_pong_count}/{self.MAX_MISSED_PONGS} "
+                            f"(time since last pong: {time_since_pong:.1f}s)"
+                        )
                         
-                        # Only force reconnect after multiple missed pongs
+                        # Only force reconnect after multiple missed pongs AND grace period
                         if self._missed_pong_count >= self.MAX_MISSED_PONGS:
-                            time_since_pong = time.time() - self._last_pong_time
-                            logger.error(f"❌ Connection appears dead - no pong for {time_since_pong:.1f}s")
-                            self._force_reconnect()
-                            break
+                            # Start grace period if not already started
+                            if self._grace_period_start is None:
+                                self._grace_period_start = current_time
+                                logger.warning(
+                                    f"⏳ Entering grace period of {self.GRACE_PERIOD_SECONDS}s before force reconnect"
+                                )
+                            elif current_time - self._grace_period_start >= self.GRACE_PERIOD_SECONDS:
+                                # Grace period expired, force reconnect
+                                logger.error(
+                                    f"❌ Connection appears dead - no pong for {time_since_pong:.1f}s, "
+                                    f"grace period ({self.GRACE_PERIOD_SECONDS}s) expired"
+                                )
+                                self._force_reconnect()
+                                break
+                            else:
+                                remaining = self.GRACE_PERIOD_SECONDS - (current_time - self._grace_period_start)
+                                logger.warning(f"⏳ Grace period remaining: {remaining:.1f}s")
+                    else:
+                        # Pong received, reset counters and grace period
+                        if self._missed_pong_count > 0:
+                            logger.info(f"✅ Connection recovered - pong received after {self._missed_pong_count} misses")
+                        self._missed_pong_count = 0
+                        self._grace_period_start = None
                     
                     # Send ping
                     self._awaiting_pong = True
-                    self._send({"ping": 1})
-                    logger.debug("Sent ping for health check")
+                    ping_sent = self._send({"ping": 1})
+                    if ping_sent:
+                        logger.debug(f"📤 Ping sent for health check (awaiting pong, last pong: {time_since_pong:.1f}s ago)")
+                    else:
+                        logger.warning("❌ Failed to send ping for health check")
                     
                 except Exception as e:
-                    logger.error(f"Health check error: {e}")
+                    logger.error(f"Health check error: {type(e).__name__}: {e}")
                     break
                     
         self.health_check_thread = threading.Thread(target=health_check_loop, daemon=True)
         self.health_check_thread.start()
-        logger.debug("Health check thread started")
+        logger.info("🏥 Health check thread started with jitter enabled")
         
     def _force_reconnect(self):
         """Force close dan reconnect"""
@@ -532,8 +592,54 @@ class DerivWebSocket:
         self.is_authorized = False
         self._attempt_reconnect()
         
+    def _check_network_connectivity(self) -> bool:
+        """
+        Pre-check network connectivity sebelum reconnect.
+        Returns True jika network tersedia, False jika tidak.
+        """
+        import socket
+        
+        try:
+            # Try to resolve DNS untuk Deriv WebSocket server
+            socket.setdefaulttimeout(5)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("ws.derivws.com", 443))
+            logger.debug("✅ Network connectivity check passed")
+            return True
+        except socket.error as e:
+            logger.warning(f"⚠️ Network connectivity check failed: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ Network check error: {type(e).__name__}: {e}")
+            return False
+    
+    def _clear_pending_subscriptions(self):
+        """Clear semua pending subscriptions sebelum re-authorize"""
+        logger.info("🧹 Clearing pending subscriptions before reconnect...")
+        
+        with self.lock:
+            self.pending_requests.clear()
+            self.tick_subscription_id = None
+            self.contract_subscription_id = None
+            self.request_id = 0
+            
+        logger.debug("Pending subscriptions cleared")
+    
+    def _validate_connection_state(self) -> bool:
+        """Validate connection state sebelum operations"""
+        if self._connection_state in ["failed", "disconnected"]:
+            logger.debug(f"Connection state validation: {self._connection_state} - not ready")
+            return False
+        return True
+    
     def _attempt_reconnect(self):
-        """Coba reconnect dengan exponential backoff"""
+        """
+        Coba reconnect dengan exponential backoff.
+        
+        Enhancement v2.1:
+        - Pre-check network connectivity sebelum reconnect
+        - Clear pending subscriptions sebelum re-authorize
+        - Connection state validation
+        """
         if self.reconnect_count >= self.MAX_RECONNECT_ATTEMPTS:
             logger.error("❌ Max reconnect attempts reached. Giving up.")
             self._update_connection_state("failed")
@@ -551,6 +657,25 @@ class DerivWebSocket:
         self._update_connection_state("reconnecting")
         
         time.sleep(delay)
+        
+        # Pre-check network connectivity
+        if not self._check_network_connectivity():
+            logger.warning("⚠️ Network not available, waiting before retry...")
+            # Wait additional time if network is not available
+            time.sleep(min(delay, 10))
+            
+            # Check again
+            if not self._check_network_connectivity():
+                logger.error("❌ Network still unavailable after wait")
+                # Don't count this as a failed attempt, just retry
+                self.reconnect_count -= 1
+                self._attempt_reconnect()
+                return
+        
+        # Clear pending subscriptions sebelum reconnect
+        self._clear_pending_subscriptions()
+        
+        # Validate and connect
         self.connect()
         
     def connect(self) -> bool:
