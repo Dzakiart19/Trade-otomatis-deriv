@@ -22,6 +22,14 @@ from datetime import datetime
 
 from strategy import TradingStrategy, Signal, AnalysisResult
 from deriv_ws import DerivWebSocket, AccountType
+from symbols import (
+    SUPPORTED_SYMBOLS, 
+    DEFAULT_SYMBOL, 
+    MIN_STAKE_GLOBAL,
+    get_symbol_config,
+    validate_duration_for_symbol,
+    get_symbol_list_text
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -82,9 +90,6 @@ class TradingManager:
     Menggabungkan strategi, eksekusi, dan money management.
     """
     
-    # Konstanta trading
-    MIN_STAKE = 0.50  # Stake minimum Deriv untuk XAUUSD
-    DEFAULT_STAKE = 0.50
     MARTINGALE_MULTIPLIER = 2.1
     
     def __init__(self, deriv_ws: DerivWebSocket):
@@ -98,12 +103,12 @@ class TradingManager:
         self.strategy = TradingStrategy()
         
         # Trading parameters
-        self.base_stake = self.DEFAULT_STAKE
-        self.current_stake = self.DEFAULT_STAKE
+        self.base_stake = MIN_STAKE_GLOBAL
+        self.current_stake = MIN_STAKE_GLOBAL
         self.duration = 5
         self.duration_unit = "t"  # ticks (5 tick untuk Volatility Index)
         self.target_trades = 0  # 0 = unlimited
-        self.symbol = "R_100"  # Volatility 100 Index - mendukung short-term trading
+        self.symbol = DEFAULT_SYMBOL  # Default symbol dari konfigurasi
         
         # State management
         self.state = TradingState.IDLE
@@ -323,9 +328,11 @@ class TradingManager:
         self.state = TradingState.WAITING_RESULT
         self.current_trade_type = contract_type
         
-        # Validasi stake
-        if self.current_stake < self.MIN_STAKE:
-            self.current_stake = self.MIN_STAKE
+        # Validasi stake berdasarkan symbol
+        symbol_config = get_symbol_config(self.symbol)
+        min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+        if self.current_stake < min_stake:
+            self.current_stake = min_stake
             
         # Cek balance cukup
         if self.current_stake > self.ws.get_balance():
@@ -368,10 +375,17 @@ class TradingManager:
         Returns:
             Pesan konfirmasi atau error
         """
-        # Validasi stake
-        if stake < self.MIN_STAKE:
-            logger.warning(f"⚠️ Stake ${stake} dibawah minimum. Disesuaikan ke ${self.MIN_STAKE}")
-            stake = self.MIN_STAKE
+        # Validasi stake berdasarkan symbol
+        symbol_config = get_symbol_config(symbol)
+        min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+        if stake < min_stake:
+            logger.warning(f"⚠️ Stake ${stake} dibawah minimum untuk {symbol}. Disesuaikan ke ${min_stake}")
+            stake = min_stake
+            
+        # Validasi durasi untuk symbol
+        is_valid, error_msg = validate_duration_for_symbol(symbol, duration, duration_unit)
+        if not is_valid:
+            return f"❌ Error: {error_msg}"
             
         self.base_stake = stake
         self.current_stake = stake
@@ -401,10 +415,12 @@ class TradingManager:
         if not self.ws.is_ready():
             return "❌ WebSocket belum terkoneksi. Coba lagi nanti."
             
-        # Double-check stake validation (防止 bypass)
-        if self.base_stake < self.MIN_STAKE:
-            logger.warning(f"⚠️ Base stake ${self.base_stake} dibawah minimum. Disesuaikan ke ${self.MIN_STAKE}")
-            self.base_stake = self.MIN_STAKE
+        # Double-check stake validation
+        symbol_config = get_symbol_config(self.symbol)
+        min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
+        if self.base_stake < min_stake:
+            logger.warning(f"⚠️ Base stake ${self.base_stake} dibawah minimum. Disesuaikan ke ${min_stake}")
+            self.base_stake = min_stake
         
         # Reset stats untuk session baru
         self.stats = SessionStats()
