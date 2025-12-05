@@ -13,6 +13,7 @@ Fitur:
 =============================================================
 """
 
+import os
 import json
 import threading
 import time
@@ -48,9 +49,6 @@ class DerivWebSocket:
     Thread-safe dan mendukung auto-reconnect.
     """
     
-    # Deriv WebSocket URL
-    WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-    
     # Reconnect settings
     MAX_RECONNECT_ATTEMPTS = 5
     RECONNECT_DELAY = 5  # detik
@@ -65,6 +63,11 @@ class DerivWebSocket:
         """
         self.demo_token = demo_token
         self.real_token = real_token
+        
+        # Ambil APP_ID dari environment atau gunakan default
+        app_id = os.environ.get("DERIV_APP_ID", "1089")
+        self.ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+        logger.info(f"Using Deriv App ID: {app_id}")
         
         # Status koneksi
         self.ws: Optional[websocket.WebSocketApp] = None
@@ -295,7 +298,7 @@ class DerivWebSocket:
         try:
             # Buat WebSocket app
             self.ws = websocket.WebSocketApp(
-                self.WS_URL,
+                self.ws_url,
                 on_open=self._on_open,
                 on_close=self._on_close,
                 on_error=self._on_error,
