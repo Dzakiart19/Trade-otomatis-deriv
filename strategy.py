@@ -216,7 +216,7 @@ class TradingStrategy:
     ADX_PERIOD = 14
     ADX_STRONG_TREND = 25
     ADX_WEAK_TREND = 20
-    ADX_NO_TREND = 20
+    ADX_NO_TREND = 15
     
     TREND_TICKS = 3
     MIN_TICK_HISTORY = 30
@@ -229,10 +229,10 @@ class TradingStrategy:
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
-    COOLDOWN_SECONDS = 45
+    COOLDOWN_SECONDS = 30
     VOLUME_HISTORY_SIZE = 20
     EMA_SLOPE_LOOKBACK = 5
-    MIN_CONFLUENCE_SCORE = 65
+    MIN_CONFLUENCE_SCORE = 50
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -334,7 +334,7 @@ class TradingStrategy:
             low_size = sys.getsizeof(self.low_history)
             total_size = tick_size + high_size + low_size
             
-            logger.info(
+            logger.debug(
                 f"📊 Memory stats @ tick {self.total_tick_count}: "
                 f"tick_history={len(self.tick_history)} items ({tick_size} bytes), "
                 f"total_buffer_size={total_size} bytes"
