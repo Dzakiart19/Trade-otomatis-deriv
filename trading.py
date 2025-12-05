@@ -393,6 +393,12 @@ class TradingManager:
         # Tambahkan tick ke strategy
         self.strategy.add_tick(price)
         
+        # Check buy timeout dulu sebelum check state
+        if self.buy_request_time > 0:
+            if self._check_buy_timeout():
+                logger.info("🔄 Buy timeout handled, continuing to next tick")
+                return
+        
         # Jika sedang dalam posisi, tidak perlu analisis
         if self.state == TradingState.WAITING_RESULT:
             return
@@ -866,6 +872,7 @@ class TradingManager:
         """Reset semua flags dan state untuk mencegah deadlock"""
         self.is_processing_signal = False
         self.signal_processing_start_time = 0.0
+        self.buy_request_time = 0.0
         if self.state == TradingState.WAITING_RESULT:
             self.state = TradingState.RUNNING
         self.current_contract_id = None

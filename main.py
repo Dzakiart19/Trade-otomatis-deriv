@@ -52,6 +52,7 @@ from symbols import (
 )
 
 USD_TO_IDR = 15800
+CHAT_ID_FILE = "logs/active_chat_id.txt"
 
 load_dotenv()
 
@@ -64,17 +65,54 @@ logger = logging.getLogger(__name__)
 deriv_ws: Optional[DerivWebSocket] = None
 trading_manager: Optional[TradingManager] = None
 active_chat_id: Optional[int] = None
+chat_id_confirmed: bool = False
 shutdown_requested: bool = False
 last_progress_notification_time: float = 0.0
 MIN_NOTIFICATION_INTERVAL: float = 10.0
 
+import threading
+_chat_id_lock = threading.Lock()
+
+
+def save_chat_id(chat_id: int) -> bool:
+    """Save chat_id ke file untuk persistence setelah restart (thread-safe)"""
+    with _chat_id_lock:
+        try:
+            os.makedirs("logs", exist_ok=True)
+            with open(CHAT_ID_FILE, "w") as f:
+                f.write(str(chat_id))
+            logger.info(f"💾 Chat ID saved: {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save chat_id: {e}")
+            return False
+
+
+def load_chat_id() -> Optional[int]:
+    """Load chat_id dari file setelah bot restart (thread-safe)"""
+    with _chat_id_lock:
+        try:
+            if os.path.exists(CHAT_ID_FILE):
+                with open(CHAT_ID_FILE, "r") as f:
+                    chat_id_str = f.read().strip()
+                    if chat_id_str:
+                        chat_id = int(chat_id_str)
+                        logger.info(f"📂 Chat ID loaded from file: {chat_id}")
+                        return chat_id
+        except Exception as e:
+            logger.error(f"Failed to load chat_id: {e}")
+        return None
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
-    global active_chat_id
+    global active_chat_id, chat_id_confirmed
     if not update.effective_chat or not update.message:
         return
-    active_chat_id = update.effective_chat.id
+    with _chat_id_lock:
+        active_chat_id = update.effective_chat.id
+        chat_id_confirmed = True
+    save_chat_id(active_chat_id)
     
     welcome_text = (
         "🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
@@ -322,12 +360,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk semua inline button callbacks"""
-    global deriv_ws, trading_manager
+    global deriv_ws, trading_manager, active_chat_id, chat_id_confirmed
     
     query = update.callback_query
     if not query or not query.data:
         return
     await query.answer()
+    
+    if query.message and query.message.chat:
+        new_chat_id = query.message.chat.id
+        with _chat_id_lock:
+            if active_chat_id != new_chat_id:
+                active_chat_id = new_chat_id
+                chat_id_confirmed = True
+        save_chat_id(new_chat_id)
     
     data = query.data
     
@@ -680,6 +726,7 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
     Menggunakan requests library untuk menghindari masalah asyncio event loop.
     
     Features:
+    - Thread-safe dengan locking
     - Retry dengan exponential backoff (max 3x)
     - Fallback ke plain text jika Markdown gagal 2x
     - Log failed messages ke file
@@ -689,26 +736,33 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
         message: Pesan yang akan dikirim
         use_html: Jika True, gunakan HTML parse mode, jika False coba Markdown lalu plain text
     """
-    global active_chat_id
-    if not active_chat_id:
-        logger.warning("No active chat_id, cannot send message")
+    global active_chat_id, chat_id_confirmed
+    
+    with _chat_id_lock:
+        current_chat_id = active_chat_id
+        is_confirmed = chat_id_confirmed
+    
+    if not current_chat_id or not is_confirmed:
+        logger.warning("No active chat_id or not confirmed. Please send /start to the bot first.")
         return False
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     parse_mode = "HTML" if use_html else "Markdown"
     max_retries = 3
+    
+    chat_id_to_use = current_chat_id
     markdown_failures = 0
     
     for attempt in range(max_retries):
         try:
             if markdown_failures >= 2:
                 payload = {
-                    "chat_id": active_chat_id,
+                    "chat_id": chat_id_to_use,
                     "text": message.replace('**', '').replace('*', '').replace('`', '').replace('_', '')
                 }
             else:
                 payload = {
-                    "chat_id": active_chat_id,
+                    "chat_id": chat_id_to_use,
                     "text": message,
                     "parse_mode": parse_mode
                 }
@@ -716,7 +770,7 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
             response = requests.post(url, json=payload, timeout=10)
             
             if response.status_code == 200:
-                logger.debug(f"Message sent successfully to chat {active_chat_id}")
+                logger.debug(f"Message sent successfully to chat {chat_id_to_use}")
                 return True
             elif response.status_code == 400:
                 response_data = response.json()
@@ -839,38 +893,43 @@ def setup_trading_callbacks(telegram_token: str):
         """Callback untuk progress notification saat mengumpulkan data"""
         global last_progress_notification_time
         
-        logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}")
-        
-        current_time = time.time()
-        time_since_last = current_time - last_progress_notification_time
-        
-        if time_since_last < MIN_NOTIFICATION_INTERVAL:
-            logger.debug(f"Skipping progress notification (debounce: {time_since_last:.1f}s < {MIN_NOTIFICATION_INTERVAL}s)")
-            return
-        
-        if rsi > 0:
-            rsi_text = f"{rsi:.1f}"
-        else:
-            rsi_text = "calculating..."
+        try:
+            logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}")
             
-        progress_pct = int((tick_count / required_ticks) * 100)
-        progress_bar = "▓" * (progress_pct // 10) + "░" * (10 - progress_pct // 10)
-        
-        message = (
-            f"📊 **Menganalisis market...**\n\n"
-            f"• Progress: [{progress_bar}] {progress_pct}%\n"
-            f"• Tick: {tick_count}/{required_ticks}\n"
-            f"• RSI: {rsi_text}\n"
-            f"• Trend: {trend}\n\n"
-            f"⏳ Menunggu sinyal trading..."
-        )
-        
-        result = send_telegram_message_sync(telegram_token, message)
-        if result:
-            last_progress_notification_time = current_time
-            logger.info(f"✅ Progress message sent successfully")
-        else:
-            logger.error(f"❌ Failed to send progress message")
+            current_time = time.time()
+            time_since_last = current_time - last_progress_notification_time
+            
+            if time_since_last < MIN_NOTIFICATION_INTERVAL:
+                logger.debug(f"Skipping progress notification (debounce: {time_since_last:.1f}s < {MIN_NOTIFICATION_INTERVAL}s)")
+                return
+            
+            if rsi > 0:
+                rsi_text = f"{rsi:.1f}"
+            else:
+                rsi_text = "calculating..."
+                
+            progress_pct = int((tick_count / required_ticks) * 100) if required_ticks > 0 else 0
+            progress_bar = "▓" * (progress_pct // 10) + "░" * (10 - progress_pct // 10)
+            
+            message = (
+                f"📊 **Menganalisis market...**\n\n"
+                f"• Progress: [{progress_bar}] {progress_pct}%\n"
+                f"• Tick: {tick_count}/{required_ticks}\n"
+                f"• RSI: {rsi_text}\n"
+                f"• Trend: {trend}\n\n"
+                f"⏳ Menunggu sinyal trading..."
+            )
+            
+            result = send_telegram_message_sync(telegram_token, message)
+            if result:
+                last_progress_notification_time = current_time
+                logger.info(f"✅ Progress message sent successfully")
+            else:
+                logger.warning(f"⚠️ Progress message not sent (no chat_id or error)")
+        except Exception as e:
+            logger.error(f"❌ Error in on_progress callback: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
         
     trading_manager.on_trade_opened = on_trade_opened
     trading_manager.on_trade_closed = on_trade_closed
@@ -999,6 +1058,8 @@ def initialize_deriv():
 
 def main():
     """Main function - entry point aplikasi"""
+    global active_chat_id, chat_id_confirmed
+    
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     
     if not telegram_token:
@@ -1009,6 +1070,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
     logger.info("✅ Signal handlers registered (SIGTERM, SIGINT)")
+    
+    loaded_chat_id = load_chat_id()
+    if loaded_chat_id:
+        with _chat_id_lock:
+            active_chat_id = loaded_chat_id
+        logger.info(f"📂 Chat ID pre-loaded (requires /start to confirm): {active_chat_id}")
         
     start_keep_alive()
     initialize_deriv()

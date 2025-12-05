@@ -306,6 +306,29 @@ Format Durasi:
    - Fixed TradingState enum di shutdown handler (main.py)
    - TRADING/WAITING → RUNNING/WAITING_RESULT
 
+### Version 2.3 - Chat ID Persistence & Trade Stuck Fix (2025-12-05)
+
+1. **Chat ID Persistence dengan Konfirmasi**
+   - Chat ID disimpan ke file `logs/active_chat_id.txt`
+   - Thread-safe dengan `threading.Lock()` untuk semua operasi
+   - Memerlukan konfirmasi user (/start atau button) sebelum mengirim pesan
+   - Mencegah pengiriman pesan ke user yang salah
+
+2. **Trading State Reset yang Lebih Baik**
+   - `_reset_processing_state()` sekarang juga reset `buy_request_time`
+   - Buy timeout check di `_on_tick()` sebelum check state lain
+   - Mencegah trade stuck karena state tidak di-reset
+
+3. **Progress Callback Error Handling**
+   - Try/catch wrapper untuk on_progress callback
+   - Division by zero protection untuk progress percentage
+   - Better logging untuk debugging
+
+4. **Send Telegram Message Improvements**
+   - Menggunakan local variable `chat_id_to_use` untuk thread safety
+   - Validasi `chat_id_confirmed` sebelum mengirim
+   - Warning yang lebih jelas jika chat_id tidak ada
+
 ## Development
 
 ### Dependencies
