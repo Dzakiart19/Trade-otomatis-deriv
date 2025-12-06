@@ -26,7 +26,7 @@ Usage:
     from web_server import create_app, run_server
     
     app = create_app()
-    await run_server(app, host="0.0.0.0", port=5000)
+    await run_server(app, host="0.0.0.0", port=8000)
 =============================================================
 """
 
@@ -356,6 +356,15 @@ def create_app() -> FastAPI:
     if os.path.exists(static_dir):
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
     
+    @app.get("/health")
+    async def root_health():
+        """Root health check endpoint for Koyeb/cloud providers (no auth required)."""
+        return JSONResponse(content={
+            "status": "healthy",
+            "service": "deriv-trading-bot",
+            "timestamp": datetime.now().isoformat()
+        })
+    
     @app.get("/", response_class=HTMLResponse)
     async def serve_dashboard():
         """Serve the main dashboard HTML page."""
@@ -608,13 +617,13 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-async def run_server(host: str = "0.0.0.0", port: int = 5000) -> None:
+async def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
     """
     Run the FastAPI server with uvicorn.
     
     Args:
         host: Host to bind to (default: 0.0.0.0)
-        port: Port to bind to (default: 5000)
+        port: Port to bind to (default: 8000)
     """
     import uvicorn
     
@@ -631,7 +640,7 @@ async def run_server(host: str = "0.0.0.0", port: int = 5000) -> None:
     await server.serve()
 
 
-def run_server_sync(host: str = "0.0.0.0", port: int = 5000) -> None:
+def run_server_sync(host: str = "0.0.0.0", port: int = 8000) -> None:
     """
     Run the FastAPI server synchronously (blocking).
     
@@ -639,7 +648,7 @@ def run_server_sync(host: str = "0.0.0.0", port: int = 5000) -> None:
     
     Args:
         host: Host to bind to (default: 0.0.0.0)
-        port: Port to bind to (default: 5000)
+        port: Port to bind to (default: 8000)
     """
     import uvicorn
     

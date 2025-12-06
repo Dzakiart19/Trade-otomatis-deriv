@@ -1,12 +1,20 @@
 name: deriv-trading-bot
-type: worker
+type: web
 docker:
   dockerfile: Dockerfile
+ports:
+  - port: 8000
+    protocol: http
+routes:
+  - path: /
+    port: 8000
 env:
   - key: PYTHONUNBUFFERED
     value: "1"
   - key: TZ
     value: "Asia/Jakarta"
+  - key: PORT
+    value: "8000"
   - key: TELEGRAM_BOT_TOKEN
     value: "@secret:TELEGRAM_BOT_TOKEN"
   - key: DERIV_APP_ID
@@ -20,4 +28,12 @@ instance_types:
 scaling:
   min: 1
   max: 1
-health_checks: []
+health_checks:
+  - type: http
+    port: 8000
+    path: /api/health
+    interval_seconds: 30
+    timeout_seconds: 10
+    healthy_threshold: 2
+    unhealthy_threshold: 3
+    grace_period: 60
