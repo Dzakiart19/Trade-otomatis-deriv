@@ -161,13 +161,13 @@ class TradingDashboard {
                     background: var(--bg-secondary);
                     padding: 2px 6px;
                     border-radius: 4px;
-                    color: var(--accent-blue);
+                    color: var(--accent-primary);
                 }
                 #close-btn {
                     width: 100%;
                     padding: 12px;
-                    background: var(--accent-blue);
-                    color: #000;
+                    background: var(--accent-primary);
+                    color: #fff;
                     border: none;
                     border-radius: 8px;
                     font-size: 1rem;
@@ -219,16 +219,16 @@ class TradingDashboard {
                 #auth-btn {
                     width: 100%;
                     padding: 12px;
-                    background: var(--accent-blue);
-                    color: #000;
+                    background: var(--accent-primary);
+                    color: #fff;
                     border: none;
                     border-radius: 8px;
                     font-size: 1rem;
                     font-weight: 600;
                     cursor: pointer;
-                    transition: opacity 0.2s;
+                    transition: background 0.2s ease;
                 }
-                #auth-btn:hover { opacity: 0.9; }
+                #auth-btn:hover { background: #2563EB; }
                 .auth-error { 
                     color: var(--accent-red); 
                     margin-top: 15px;
@@ -319,11 +319,11 @@ class TradingDashboard {
                     y: {
                         display: true,
                         grid: {
-                            color: 'rgba(255, 255, 255, 0.05)',
+                            color: 'rgba(0, 0, 0, 0.06)',
                             drawBorder: false
                         },
                         ticks: {
-                            color: '#a0a0a0',
+                            color: '#6B7280',
                             font: { size: 10 },
                             maxTicksLimit: 4
                         }
@@ -345,8 +345,8 @@ class TradingDashboard {
                     datasets: [
                         {
                             data: [],
-                            borderColor: '#00d4ff',
-                            backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                            borderColor: '#3B82F6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
                             fill: true,
                             pointRadius: 0
                         },
@@ -379,7 +379,7 @@ class TradingDashboard {
             const entryPrice = position.entry_price;
             const direction = position.direction.toLowerCase();
             const isCall = direction === 'call';
-            const color = isCall ? '#00ff88' : '#ff4757';
+            const color = isCall ? '#10B981' : '#EF4444';
             
             chart.options.plugins.annotation.annotations = {
                 entryLine: {
