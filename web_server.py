@@ -49,6 +49,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from event_bus import get_event_bus, Channel
+from user_auth import auth_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -416,9 +417,21 @@ def create_app() -> FastAPI:
             if not telegram_id:
                 raise HTTPException(status_code=400, detail="Invalid user data")
             
+            telegram_id_int = int(telegram_id)
+            if not auth_manager.is_authenticated(telegram_id_int):
+                logger.warning(f"Telegram user {telegram_id} attempted dashboard access without bot login")
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "success": False,
+                        "error": "not_authenticated",
+                        "message": "Anda belum login ke bot. Silakan gunakan /login di Telegram terlebih dahulu."
+                    }
+                )
+            
             token = get_or_create_user_token(telegram_id)
             
-            logger.info(f"Telegram user authenticated: {user_info.get('first_name')} (ID: {telegram_id})")
+            logger.info(f"Telegram user authenticated for dashboard: {user_info.get('first_name')} (ID: {telegram_id})")
             
             return JSONResponse(content={
                 "success": True,

@@ -42,6 +42,9 @@ class TradingDashboard {
         const tg = window.Telegram.WebApp;
         const initData = tg.initData;
         
+        sessionStorage.removeItem('dashboard_token');
+        this.authToken = null;
+        
         try {
             const response = await fetch('/api/auth/telegram', {
                 method: 'POST',
@@ -49,13 +52,20 @@ class TradingDashboard {
                 body: JSON.stringify({ initData })
             });
             
+            const data = await response.json();
+            
+            if (response.status === 403 && data.error === 'not_authenticated') {
+                console.log('User not authenticated in bot, showing login required');
+                this.showLoginRequired(data.message);
+                tg.ready();
+                return;
+            }
+            
             if (!response.ok) {
                 console.error('Telegram auth failed:', response.status);
                 this.showAuthPrompt();
                 return;
             }
-            
-            const data = await response.json();
             
             if (data.success && data.token) {
                 this.authToken = data.token;
@@ -86,6 +96,83 @@ class TradingDashboard {
         if (header && user?.first_name) {
             header.textContent = `Welcome, ${user.first_name}!`;
         }
+    }
+    
+    showLoginRequired(message) {
+        const container = document.querySelector('.container');
+        container.innerHTML = `
+            <div class="login-required-container">
+                <div class="login-icon">🔒</div>
+                <h1>Login Diperlukan</h1>
+                <p class="message">${message || 'Anda belum login ke bot.'}</p>
+                <div class="instructions">
+                    <p><strong>Cara Login:</strong></p>
+                    <ol>
+                        <li>Kembali ke chat bot</li>
+                        <li>Ketik <code>/login</code> atau <code>/start</code></li>
+                        <li>Pilih tipe akun (Demo/Real)</li>
+                        <li>Masukkan token API Deriv Anda</li>
+                        <li>Setelah login berhasil, buka Dashboard lagi</li>
+                    </ol>
+                </div>
+                <button id="close-btn" onclick="window.Telegram?.WebApp?.close()">Tutup</button>
+            </div>
+            <style>
+                .login-required-container { 
+                    max-width: 400px; 
+                    margin: 50px auto; 
+                    text-align: center;
+                    background: var(--bg-secondary);
+                    padding: 40px;
+                    border-radius: 12px;
+                    border: 1px solid var(--border-color);
+                }
+                .login-icon { font-size: 4rem; margin-bottom: 20px; }
+                .login-required-container h1 { 
+                    color: var(--accent-red); 
+                    margin-bottom: 15px;
+                    font-size: 1.5rem;
+                }
+                .login-required-container .message { 
+                    color: var(--text-secondary); 
+                    margin-bottom: 25px;
+                    font-size: 1rem;
+                }
+                .instructions {
+                    text-align: left;
+                    background: var(--bg-card);
+                    padding: 20px;
+                    border-radius: 8px;
+                    margin-bottom: 25px;
+                }
+                .instructions p { margin-bottom: 10px; color: var(--text-primary); }
+                .instructions ol { 
+                    margin: 0; 
+                    padding-left: 20px;
+                    color: var(--text-secondary);
+                }
+                .instructions li { margin-bottom: 8px; }
+                .instructions code {
+                    background: var(--bg-secondary);
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    color: var(--accent-blue);
+                }
+                #close-btn {
+                    width: 100%;
+                    padding: 12px;
+                    background: var(--accent-blue);
+                    color: #000;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: opacity 0.2s;
+                }
+                #close-btn:hover { opacity: 0.9; }
+            </style>
+        `;
     }
     
     showAuthPrompt() {
