@@ -55,6 +55,8 @@ from symbols import (
 import csv
 import os
 
+from event_bus import get_event_bus, PositionOpenEvent, PositionCloseEvent, TradeHistoryEvent, StatusEvent
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -705,6 +707,20 @@ class TradingManager:
                 self.stats.total_trades + 1,
                 self.target_trades
             )
+        
+        # Publish PositionOpenEvent to event bus
+        try:
+            bus = get_event_bus()
+            bus.publish("position", PositionOpenEvent(
+                contract_id=self.current_contract_id or "",
+                symbol=self.symbol,
+                entry_price=self.entry_price,
+                stake=self.current_stake,
+                direction=self.current_trade_type or "UNKNOWN",
+                martingale_level=self.martingale_level
+            ))
+        except Exception as e:
+            logger.debug(f"Error publishing position open event: {e}")
             
     def _on_contract_update(self, data: dict):
         """
@@ -861,6 +877,27 @@ class TradingManager:
                 self.target_trades,
                 next_stake
             )
+        
+        # Publish PositionCloseEvent and TradeHistoryEvent to event bus
+        try:
+            bus = get_event_bus()
+            bus.publish("position", PositionCloseEvent(
+                contract_id=self.current_contract_id or "",
+                symbol=self.symbol,
+                exit_price=exit_spot,
+                profit=profit,
+                is_win=is_win
+            ))
+            bus.publish("trade", TradeHistoryEvent(
+                trade_id=self.current_contract_id or str(self.stats.total_trades),
+                symbol=self.symbol,
+                direction=self.current_trade_type or "UNKNOWN",
+                stake=self.current_stake,
+                result="win" if is_win else "loss",
+                profit=profit
+            ))
+        except Exception as e:
+            logger.debug(f"Error publishing trade events: {e}")
             
         # Reset processing flags SEBELUM cek target
         self.is_processing_signal = False

@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from enum import Enum
 import websocket
 
+from event_bus import get_event_bus, TickEvent, BalanceUpdateEvent
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -411,6 +413,18 @@ class DerivWebSocket:
                 self.on_balance_update_callback(new_balance)
             except Exception as e:
                 logger.error(f"Error in balance callback: {e}")
+        
+        # Publish to event bus
+        if self.account_info:
+            try:
+                bus = get_event_bus()
+                bus.publish("balance", BalanceUpdateEvent(
+                    balance=new_balance,
+                    currency=self.account_info.currency,
+                    account_id=self.account_info.account_id
+                ))
+            except Exception as e:
+                logger.debug(f"Error publishing balance event: {e}")
             
     def _handle_tick(self, data: dict):
         """
@@ -455,6 +469,13 @@ class DerivWebSocket:
                 self.on_tick_callback(price_float, symbol)
             except Exception as e:
                 logger.error(f"Error in global tick callback: {e}")
+        
+        # 3. Publish to event bus
+        try:
+            bus = get_event_bus()
+            bus.publish("tick", TickEvent(symbol=symbol, price=price_float))
+        except Exception as e:
+            logger.debug(f"Error publishing tick event: {e}")
     
     def _handle_ticks_history(self, data: dict):
         """Handle response dari ticks_history request"""
