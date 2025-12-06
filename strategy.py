@@ -192,10 +192,10 @@ class TradingStrategy:
     RSI_PERIOD = 14
     RSI_OVERSOLD = 30  # Standard oversold level
     RSI_OVERBOUGHT = 70  # Standard overbought level
-    RSI_BUY_ENTRY_MIN = 20  # Optimal entry zone for mean-reversion
-    RSI_BUY_ENTRY_MAX = 32  # Slightly wider for catching reversals
-    RSI_SELL_ENTRY_MIN = 68  # Slightly wider for catching reversals
-    RSI_SELL_ENTRY_MAX = 80  # Optimal entry zone for mean-reversion
+    RSI_BUY_ENTRY_MIN = 22  # Tightened: was 20, now 22 for better accuracy
+    RSI_BUY_ENTRY_MAX = 30  # Tightened: was 32, now 30 for optimal reversal zone
+    RSI_SELL_ENTRY_MIN = 70  # Tightened: was 68, now 70 for better accuracy
+    RSI_SELL_ENTRY_MAX = 78  # Tightened: was 80, now 78 for optimal reversal zone
     
     EMA_FAST_PERIOD = 9
     EMA_SLOW_PERIOD = 21
@@ -214,25 +214,29 @@ class TradingStrategy:
     ATR_SL_MULTIPLIER = 1.5
     
     ADX_PERIOD = 14
-    ADX_STRONG_TREND = 25  # Strong trend threshold
-    ADX_WEAK_TREND = 20  # Weak trend threshold
-    ADX_NO_TREND = 15  # Ranging market - good for mean-reversion
+    ADX_STRONG_TREND = 22  # Adjusted: was 25, now 22 for better signal frequency
+    ADX_WEAK_TREND = 18  # Adjusted: was 20, now 18
+    ADX_NO_TREND = 12  # Adjusted: was 15, now 12 for ranging market detection
     
     TREND_TICKS = 3
     MIN_TICK_HISTORY = 30
     MIN_VOLATILITY = 0.05
     
-    MIN_CONFIDENCE_THRESHOLD = 0.40  # Lower threshold for more signals
+    MIN_CONFIDENCE_THRESHOLD = 0.50  # Balanced: was 0.40, now 0.50 for better accuracy without losing signals
     
     MAX_TICK_HISTORY = 200
     MEMORY_CLEANUP_INTERVAL = 100
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
-    COOLDOWN_SECONDS = 10  # Faster cooldown for synthetic indices
+    COOLDOWN_SECONDS = 12  # Balanced: was 10, now 12 for better entry timing
     VOLUME_HISTORY_SIZE = 20
     EMA_SLOPE_LOOKBACK = 5
-    MIN_CONFLUENCE_SCORE = 20  # Even lower - focus on basic indicators for 5-tick
+    MIN_CONFLUENCE_SCORE = 40  # Balanced: was 20, now 40 for better signal quality (0-100 scale)
+    
+    ADX_DIRECTIONAL_CONFLICT_THRESHOLD = 15  # HARD BLOCK if DI diff > 15 (gives some tolerance)
+    BLOCK_EXTREME_VOLATILITY = True  # HARD BLOCK on EXTREME_HIGH volatility
+    BLOCK_EMA_SLOPE_CONFLICT = False  # Soft warning only - don't hard block EMA slope
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -789,13 +793,13 @@ class TradingStrategy:
     
     def check_adx_filter(self, adx: float, plus_di: float, minus_di: float, 
                         signal_type: str) -> Tuple[bool, str, float]:
-        """Check ADX filter for trend strength with enhanced directional conflict detection.
+        """Check ADX filter for trend strength with HARD BLOCK for directional conflict.
         
-        Enhancement v2.3:
-        - Added +10 threshold for directional conflict detection
-        - BUY conflict: minus_di > plus_di + 10
-        - SELL conflict: plus_di > minus_di + 10
-        - ADX < 20 is hard block (sideways market)
+        Enhancement v2.4:
+        - HARD BLOCK for directional conflict when diff > ADX_DIRECTIONAL_CONFLICT_THRESHOLD
+        - BUY conflict: minus_di > plus_di + threshold → BLOCK
+        - SELL conflict: plus_di > minus_di + threshold → BLOCK
+        - ADX < ADX_NO_TREND is warning but allowed for ranging market mean-reversion
         
         Args:
             adx: Current ADX value
@@ -807,56 +811,44 @@ class TradingStrategy:
             Tuple of (is_valid, reason, tp_multiplier)
         """
         if adx < self.ADX_NO_TREND:
-            # For synthetic indices, ranging markets can still be traded with caution
             reason = f"⚠️ ADX lemah: {adx:.1f} < {self.ADX_NO_TREND} (ranging market - reduced TP)"
             logger.debug(reason)
-            return True, reason, 0.6  # Allow signal with reduced confidence
+            return True, reason, 0.6
         
         directional_conflict = False
-        conflict_warning = False
         di_info = ""
+        di_diff = abs(plus_di - minus_di)
         
         if plus_di > minus_di:
             di_info = f"+DI({plus_di:.1f}) > -DI({minus_di:.1f}) = Bullish"
             if signal_type == "SELL":
                 directional_conflict = True
-                if plus_di > minus_di + 10:
-                    conflict_warning = True
         elif minus_di > plus_di:
             di_info = f"-DI({minus_di:.1f}) > +DI({plus_di:.1f}) = Bearish"
             if signal_type == "BUY":
                 directional_conflict = True
-                if minus_di > plus_di + 10:
-                    conflict_warning = True
         else:
             di_info = f"+DI({plus_di:.1f}) ≈ -DI({minus_di:.1f}) = Neutral"
         
-        if conflict_warning:
-            di_diff = abs(plus_di - minus_di)
-            if di_diff >= 15:  # Increased threshold for hard block
-                reason = f"⚠️ ADX directional conflict: {signal_type} vs {di_info} (diff={di_diff:.1f}), TP reduced"
-                logger.debug(reason)
-                return True, reason, 0.5  # Allow signal with reduced confidence instead of blocking
-            else:
-                reason = f"⚠️ ADX directional conflict minor: {signal_type} vs {di_info} (diff={di_diff:.1f})"
-                logger.debug(reason)
-                return True, reason, 0.7
+        if directional_conflict and di_diff >= self.ADX_DIRECTIONAL_CONFLICT_THRESHOLD:
+            reason = f"🚫 HARD BLOCK: ADX directional conflict {signal_type} vs {di_info} (diff={di_diff:.1f} >= {self.ADX_DIRECTIONAL_CONFLICT_THRESHOLD})"
+            logger.warning(reason)
+            return False, reason, 0.0
         
-        if directional_conflict and adx >= self.ADX_STRONG_TREND:
-            di_diff = abs(plus_di - minus_di)
-            reason = f"⚠️ ADX minor conflict: {signal_type} vs {di_info} (diff={di_diff:.1f})"
+        if directional_conflict and di_diff >= 8:
+            reason = f"⚠️ ADX directional conflict minor: {signal_type} vs {di_info} (diff={di_diff:.1f})"
             logger.debug(reason)
-            return True, reason, 0.85
+            return True, reason, 0.7
         
         if adx >= self.ADX_STRONG_TREND:
             reason = f"✅ ADX strong: {adx:.1f} >= {self.ADX_STRONG_TREND} | {di_info}"
             return True, reason, 1.0
         elif adx >= self.ADX_WEAK_TREND:
             reason = f"✅ ADX moderate: {adx:.1f} >= {self.ADX_WEAK_TREND} | {di_info}"
-            return True, reason, 0.85
+            return True, reason, 0.9
         else:
             reason = f"⚠️ ADX weak: {adx:.1f} < {self.ADX_WEAK_TREND} | {di_info}"
-            return True, reason, 0.7
+            return True, reason, 0.75
         
     def detect_trend(self, ticks: int = 3) -> Tuple[str, int]:
         """
@@ -1077,6 +1069,10 @@ class TradingStrategy:
                 logger.debug(reason)
                 return True, reason, slope_data
             else:
+                if self.BLOCK_EMA_SLOPE_CONFLICT and slope_data['strength'] == 'strong':
+                    reason = f"🚫 HARD BLOCK: EMA slope conflict for BUY: strong {direction} ({slope_value:.4f}%)"
+                    logger.warning(reason)
+                    return False, reason, slope_data
                 reason = f"⚠️ EMA slope warning for BUY: {direction} ({slope_value:.4f}%)"
                 logger.debug(reason)
                 return False, reason, slope_data
@@ -1087,6 +1083,10 @@ class TradingStrategy:
                 logger.debug(reason)
                 return True, reason, slope_data
             else:
+                if self.BLOCK_EMA_SLOPE_CONFLICT and slope_data['strength'] == 'strong':
+                    reason = f"🚫 HARD BLOCK: EMA slope conflict for SELL: strong {direction} ({slope_value:.4f}%)"
+                    logger.warning(reason)
+                    return False, reason, slope_data
                 reason = f"⚠️ EMA slope warning for SELL: {direction} ({slope_value:.4f}%)"
                 logger.debug(reason)
                 return False, reason, slope_data
@@ -1514,6 +1514,13 @@ class TradingStrategy:
         vol_zone, vol_multiplier = self.get_volatility_zone()
         result.volatility_zone = vol_zone
         result.volatility_multiplier = vol_multiplier
+        
+        if self.BLOCK_EXTREME_VOLATILITY and vol_zone == "EXTREME_HIGH":
+            result.signal = Signal.WAIT
+            result.confidence = 0.0
+            result.reason = f"🚫 HARD BLOCK: EXTREME_HIGH volatility zone detected - too risky for entry"
+            logger.warning(f"🚫 Signal blocked: EXTREME_HIGH volatility zone")
+            return result
         
         if indicators.atr > 0:
             result.tp_distance = indicators.atr * self.ATR_TP_MULTIPLIER

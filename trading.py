@@ -251,11 +251,11 @@ class TradingManager:
     """
     
     MARTINGALE_MULTIPLIER = 2.0  # Reduced from 2.1 for better risk management
-    MAX_MARTINGALE_LEVEL = 4  # Reduced from 5 to limit exposure
+    MAX_MARTINGALE_LEVEL = 3  # Reduced from 4 to limit exposure even more
     
     MAX_LOSS_PERCENT = 0.15  # Reduced from 0.20 for more conservative risk
-    MAX_CONSECUTIVE_LOSSES = 4  # Reduced from 5 to stop earlier
-    TRADE_COOLDOWN_SECONDS = 3.0  # Increased from 2.0 for better entry timing
+    MAX_CONSECUTIVE_LOSSES = 2  # CRITICAL: Reduced from 4 to 2 to limit consecutive losses
+    TRADE_COOLDOWN_SECONDS = 4.0  # Increased from 3.0 for better entry timing
     MAX_BUY_RETRY = 5
     MAX_DAILY_LOSS = 50.0
     SIGNAL_PROCESSING_TIMEOUT = 120.0
