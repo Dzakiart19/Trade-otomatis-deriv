@@ -31,9 +31,9 @@ scaling:
 health_checks:
   - type: http
     port: 8000
-    path: /api/health
-    interval_seconds: 30
-    timeout_seconds: 10
-    healthy_threshold: 2
-    unhealthy_threshold: 3
-    grace_period: 60
+    path: /health
+    interval_seconds: 60
+    timeout_seconds: 30
+    healthy_threshold: 1
+    unhealthy_threshold: 5
+    grace_period: 180

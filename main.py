@@ -2202,13 +2202,15 @@ def main():
         event_bus.set_event_loop(asyncio.get_running_loop())
         logger.info("📡 EventBus loop configured for real-time updates")
         
+        web_server_task = asyncio.create_task(start_web_server())
+        await asyncio.sleep(2)
+        logger.info("✅ Web server started, now initializing Telegram bot...")
+        
         await app.initialize()
         await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook deleted, starting polling...")
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        
-        web_server_task = asyncio.create_task(start_web_server())
         
         try:
             while True:
