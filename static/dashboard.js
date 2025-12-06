@@ -710,6 +710,18 @@ class TradingDashboard {
                     this.updateChartCardIndicator(closedSymbol);
                 }
                 break;
+            case 'positions_reset':
+                this.positions = {};
+                this.symbols.forEach(symbol => {
+                    if (this.priceData[symbol]) {
+                        this.priceData[symbol].entryIndex = null;
+                        this.priceData[symbol].entryPrice = null;
+                    }
+                    this.updateChartEntryMarkers(symbol);
+                    this.updateChartCardIndicator(symbol);
+                });
+                console.log('Positions reset:', data.reason);
+                break;
         }
         this.renderPositions();
     }

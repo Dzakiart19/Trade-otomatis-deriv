@@ -56,7 +56,7 @@ from symbols import (
 import csv
 import os
 
-from event_bus import get_event_bus, PositionOpenEvent, PositionCloseEvent, TradeHistoryEvent, StatusEvent
+from event_bus import get_event_bus, PositionOpenEvent, PositionCloseEvent, PositionsResetEvent, TradeHistoryEvent, StatusEvent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -928,6 +928,16 @@ class TradingManager:
         self.is_processing_signal = False
         
         logger.info(f"🏁 Session complete! Total profit: ${self.stats.total_profit:.2f}")
+        
+        # CRITICAL: Broadcast PositionsResetEvent lalu clear dari EventBus
+        # Ini diperlukan agar dashboard WebSocket clients clear semua posisi tanpa merusak analytics
+        try:
+            bus = get_event_bus()
+            bus.publish("position", PositionsResetEvent(reason="session_complete"))
+            bus.clear_positions()
+            logger.info("🧹 Broadcast positions reset and cleared EventBus")
+        except Exception as e:
+            logger.error(f"Error clearing positions from EventBus: {e}")
         
         # CRITICAL: Reset martingale state agar session baru mulai dari awal
         logger.info(f"🔄 Resetting martingale state: level={self.martingale_level}, stake=${self.current_stake:.2f} -> base=${self.base_stake:.2f}")
@@ -1999,6 +2009,16 @@ class TradingManager:
         self.buy_request_time = 0.0
         self.buy_failure_times = []
         self.circuit_breaker_active = False
+        
+        # CRITICAL: Broadcast PositionsResetEvent lalu clear dari EventBus
+        # Ini diperlukan agar dashboard WebSocket clients clear semua posisi tanpa merusak analytics
+        try:
+            bus = get_event_bus()
+            bus.publish("position", PositionsResetEvent(reason="stop"))
+            bus.clear_positions()
+            logger.info("🧹 Broadcast positions reset and cleared EventBus")
+        except Exception as e:
+            logger.error(f"Error clearing positions from EventBus: {e}")
         
         return summary
         

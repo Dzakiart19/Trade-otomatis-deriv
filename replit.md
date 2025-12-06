@@ -78,6 +78,11 @@ Do not make changes to the file `Y`.
     - **Validasi Minimal**: Hanya validasi: stake >= minimum DAN stake <= balance
     - **Martingale Tanpa Cap**: Martingale berjalan penuh tanpa batasan persentase
     - **User Control**: Stake yang dikonfigurasi user digunakan langsung tanpa modifikasi otomatis
+- **Dashboard Position Sync Fix (v3.3)**:
+    - **PositionsResetEvent**: New event type in EventBus to signal dashboard to clear all positions
+    - **Session Complete Cleanup**: When trading stops or completes, broadcasts PositionsResetEvent then clears EventBus
+    - **Dashboard Handler**: Frontend handles `positions_reset` event, clears all positions and entry markers
+    - **No Analytics Corruption**: Unlike fake PositionCloseEvents, PositionsResetEvent doesn't create false trade history
 - **Stability & Performance Fixes (v3.0)**:
     - **WebSocket Memory Leak Fix**: `_cleanup_pending_requests()` method untuk cleanup expired pending requests setiap 60 detik via health check
     - **Thread Safety**: `is_connected` flag dijadikan thread-safe dengan `_is_connected_lock` dan property getter/setter

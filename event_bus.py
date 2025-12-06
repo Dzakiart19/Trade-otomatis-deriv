@@ -137,6 +137,20 @@ class PositionCloseEvent:
 
 
 @dataclass
+class PositionsResetEvent:
+    """Event to signal all positions should be cleared (session end/stop)"""
+    reason: str  # 'session_complete', 'stop', or 'emergency'
+    timestamp: datetime = field(default_factory=datetime.now)
+    
+    def to_dict(self) -> dict:
+        return {
+            "type": "positions_reset",
+            "reason": self.reason,
+            "timestamp": self.timestamp.isoformat()
+        }
+
+
+@dataclass
 class BalanceUpdateEvent:
     """Account balance update event"""
     balance: float
@@ -197,6 +211,7 @@ EventType = Union[
     PositionOpenEvent, 
     PositionUpdateEvent, 
     PositionCloseEvent,
+    PositionsResetEvent,
     BalanceUpdateEvent,
     TradeHistoryEvent,
     StatusEvent
