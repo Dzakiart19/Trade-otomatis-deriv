@@ -401,14 +401,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat or not update.message or not update.effective_user:
         return
     
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
     with _chat_id_lock:
-        active_chat_id = update.effective_chat.id
+        active_chat_id = chat_id
         chat_id_confirmed = True
     
     if active_chat_id is not None:
         save_chat_id(active_chat_id)
     
-    user_id = update.effective_user.id
+    save_user_chat_id(user_id, chat_id)
     is_logged_in = auth_manager.is_authenticated(user_id)
     
     if is_logged_in:
@@ -1922,7 +1925,10 @@ def shutdown_handler(signum, frame):
     shutdown_requested = True
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if telegram_token and active_chat_id:
+    shutdown_msg_sent = False
+    if telegram_token and current_connected_user_id:
+        shutdown_msg_sent = send_telegram_message_sync(telegram_token, "🛑 **Bot shutting down gracefully...**", user_id=current_connected_user_id)
+    if not shutdown_msg_sent and telegram_token and active_chat_id:
         send_telegram_message_sync(telegram_token, "🛑 **Bot shutting down gracefully...**")
     
     if trading_manager:
@@ -1956,7 +1962,10 @@ def shutdown_handler(signum, frame):
         except Exception as e:
             logger.error(f"Error disconnecting WebSocket: {e}")
     
-    if telegram_token and active_chat_id:
+    complete_msg_sent = False
+    if telegram_token and current_connected_user_id:
+        complete_msg_sent = send_telegram_message_sync(telegram_token, "✅ **Bot shutdown complete.**", user_id=current_connected_user_id)
+    if not complete_msg_sent and telegram_token and active_chat_id:
         send_telegram_message_sync(telegram_token, "✅ **Bot shutdown complete.**")
     
     logger.info("🏁 Graceful shutdown complete")
@@ -2011,6 +2020,8 @@ def main():
     global active_chat_id, chat_id_confirmed
     
     cleanup_old_logs(max_days=1)
+    
+    load_user_chat_mapping()
     
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     
