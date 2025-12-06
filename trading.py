@@ -775,13 +775,16 @@ class TradingManager:
             self.daily_loss += abs(profit)  # Track daily loss
         self.stats.total_profit += profit
         
+        # Simpan stake yang BENAR-BENAR digunakan untuk trade ini SEBELUM Martingale mengubahnya
+        actual_trade_stake = self.current_stake
+        
         # Simpan hasil trade
         result = TradeResult(
             trade_number=self.stats.total_trades,
             contract_type=self.current_trade_type or "UNKNOWN",
             entry_price=self.entry_price,
             exit_price=exit_spot,
-            stake=self.current_stake,
+            stake=actual_trade_stake,
             payout=sell_price,
             profit=profit,
             is_win=is_win
@@ -793,7 +796,7 @@ class TradingManager:
         self.analytics.add_trade(
             is_win=is_win,
             profit=profit,
-            stake=self.current_stake,
+            stake=actual_trade_stake,
             rsi_value=rsi_value,
             current_balance=self.stats.current_balance
         )
@@ -894,7 +897,7 @@ class TradingManager:
                 trade_id=self.current_contract_id or str(self.stats.total_trades),
                 symbol=self.symbol,
                 direction=self.current_trade_type or "UNKNOWN",
-                stake=self.current_stake,
+                stake=actual_trade_stake,
                 result="win" if is_win else "loss",
                 profit=profit
             ))
