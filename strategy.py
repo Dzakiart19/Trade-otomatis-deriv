@@ -249,9 +249,29 @@ class TradingStrategy:
     BLOCK_EXTREME_VOLATILITY = False  # DISABLED - synthetic indices have naturally high volatility
     BLOCK_EMA_SLOPE_CONFLICT = False  # Soft warning only - don't hard block EMA slope
     
-    MIN_PREDICTION_CONFIDENCE = 0.60  # Minimum confidence for tick direction prediction
-    PREDICTION_MOMENTUM_LOOKBACK = 15  # Ticks to analyze for momentum
-    PREDICTION_SEQUENCE_LOOKBACK = 10  # Ticks to analyze for sequence patterns
+    MIN_PREDICTION_CONFIDENCE = 0.55  # Lowered: was 0.60, now 0.55 for more signal opportunities
+    PREDICTION_MOMENTUM_LOOKBACK = 20  # Increased: was 15, now 20 ticks for better momentum detection
+    PREDICTION_SEQUENCE_LOOKBACK = 15  # Increased: was 10, now 15 ticks for better pattern detection
+    
+    # Enhanced Prediction v3.0 - Multi-Factor Deep Analysis
+    PREDICTION_ROC_LOOKBACK = 8  # Rate of Change calculation period
+    PREDICTION_PRICE_VELOCITY_PERIODS = [3, 5, 8]  # Multiple velocity periods for acceleration detection
+    PREDICTION_SUPPORT_RESISTANCE_LOOKBACK = 50  # Ticks to find S/R levels
+    PREDICTION_HIGHER_HIGHS_LOOKBACK = 12  # Ticks to detect HH/LL patterns
+    PREDICTION_BOLLINGER_PERIOD = 20  # Bollinger Bands period
+    PREDICTION_BOLLINGER_STD = 2.0  # Bollinger Bands standard deviation multiplier
+    PREDICTION_WEIGHTED_FACTORS = {
+        'momentum': 0.20,  # Price acceleration/deceleration
+        'sequence': 0.15,  # Consecutive up/down ticks
+        'ema_slope': 0.12,  # EMA trend direction
+        'macd': 0.12,  # MACD histogram direction
+        'stoch': 0.08,  # Stochastic K/D
+        'adx': 0.08,  # ADX trend strength
+        'roc': 0.08,  # Rate of Change
+        'velocity': 0.07,  # Price velocity and acceleration
+        'hh_ll': 0.05,  # Higher Highs / Lower Lows pattern
+        'bollinger': 0.05,  # Bollinger Band position
+    }
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -1436,19 +1456,210 @@ class TradingStrategy:
         
         return total_score, confidence_level, details
     
-    def predict_tick_direction(self, look_ahead: int = 5) -> Tuple[str, float]:
-        """Tick Direction Predictor for next 5-10 ticks.
-        
-        Analyzes multiple factors to predict short-term price direction:
-        1. Momentum Analysis: Price acceleration/deceleration
-        2. Tick Sequence Pattern: Consecutive up/down ticks
-        3. EMA Slope Strength: Trend direction from EMA
-        4. MACD Momentum: Histogram direction and strength
-        5. Stochastic Direction: K/D crossover direction
-        6. ADX Trend Confirmation: Strong trend = higher confidence
+    def _calculate_rate_of_change(self, period: int = 8) -> float:
+        """
+        Calculate Rate of Change (ROC) indicator.
+        ROC = ((current_price - price_n_periods_ago) / price_n_periods_ago) * 100
         
         Args:
-            look_ahead: Number of ticks to predict ahead (default 5)
+            period: Number of periods for ROC calculation
+            
+        Returns:
+            ROC value (positive = bullish, negative = bearish)
+        """
+        if len(self.tick_history) < period + 1:
+            return 0.0
+        
+        current_price = safe_float(self.tick_history[-1])
+        past_price = safe_float(self.tick_history[-period - 1])
+        
+        if past_price <= 0:
+            return 0.0
+        
+        roc = safe_divide((current_price - past_price) * 100, past_price, 0.0)
+        return round(roc, 4)
+    
+    def _calculate_price_velocity(self, periods: Optional[List[int]] = None) -> Tuple[float, float, str]:
+        """
+        Calculate price velocity and acceleration across multiple timeframes.
+        
+        Args:
+            periods: List of periods to analyze (default: [3, 5, 8])
+            
+        Returns:
+            Tuple of (average_velocity, acceleration, trend_quality)
+            - average_velocity: Average rate of price change
+            - acceleration: Change in velocity (positive = accelerating up)
+            - trend_quality: "STRONG", "MODERATE", "WEAK"
+        """
+        if periods is None:
+            periods = self.PREDICTION_PRICE_VELOCITY_PERIODS
+        
+        min_period = max(periods) if periods else 8
+        if len(self.tick_history) < min_period + 2:
+            return 0.0, 0.0, "WEAK"
+        
+        velocities = []
+        for period in periods:
+            if len(self.tick_history) >= period + 1:
+                start_price = safe_float(self.tick_history[-period - 1])
+                end_price = safe_float(self.tick_history[-1])
+                if start_price > 0:
+                    velocity = safe_divide((end_price - start_price), period, 0.0)
+                    velocities.append(velocity)
+        
+        if not velocities:
+            return 0.0, 0.0, "WEAK"
+        
+        avg_velocity = safe_divide(sum(velocities), len(velocities), 0.0)
+        
+        acceleration = 0.0
+        if len(velocities) >= 2:
+            acceleration = velocities[-1] - velocities[0]
+        
+        all_same_direction = all(v > 0 for v in velocities) or all(v < 0 for v in velocities)
+        velocity_magnitude = abs(avg_velocity)
+        
+        if all_same_direction and velocity_magnitude > 0.5:
+            trend_quality = "STRONG"
+        elif all_same_direction or velocity_magnitude > 0.2:
+            trend_quality = "MODERATE"
+        else:
+            trend_quality = "WEAK"
+        
+        return round(avg_velocity, 6), round(acceleration, 6), trend_quality
+    
+    def _detect_higher_highs_lower_lows(self, lookback: int = 12) -> Tuple[str, int, float]:
+        """
+        Detect Higher Highs / Lower Lows pattern for trend confirmation.
+        
+        Args:
+            lookback: Number of ticks to analyze
+            
+        Returns:
+            Tuple of (pattern, strength, confidence)
+            - pattern: "HH" (higher highs), "LL" (lower lows), "MIXED"
+            - strength: Number of consecutive HH or LL (1-5)
+            - confidence: 0.0 to 1.0
+        """
+        if len(self.tick_history) < lookback:
+            return "MIXED", 0, 0.0
+        
+        recent = self.tick_history[-lookback:]
+        
+        swing_size = 3
+        local_highs = []
+        local_lows = []
+        
+        for i in range(swing_size, len(recent) - swing_size):
+            is_high = all(recent[i] >= recent[i-j] for j in range(1, swing_size+1)) and \
+                      all(recent[i] >= recent[i+j] for j in range(1, min(swing_size+1, len(recent)-i)))
+            is_low = all(recent[i] <= recent[i-j] for j in range(1, swing_size+1)) and \
+                     all(recent[i] <= recent[i+j] for j in range(1, min(swing_size+1, len(recent)-i)))
+            
+            if is_high:
+                local_highs.append(recent[i])
+            if is_low:
+                local_lows.append(recent[i])
+        
+        if len(local_highs) < 2 and len(local_lows) < 2:
+            return "MIXED", 0, 0.0
+        
+        hh_count = 0
+        if len(local_highs) >= 2:
+            for i in range(1, len(local_highs)):
+                if local_highs[i] > local_highs[i-1]:
+                    hh_count += 1
+        
+        ll_count = 0
+        if len(local_lows) >= 2:
+            for i in range(1, len(local_lows)):
+                if local_lows[i] < local_lows[i-1]:
+                    ll_count += 1
+        
+        if hh_count > ll_count and hh_count >= 1:
+            pattern = "HH"
+            strength = min(5, hh_count + 1)
+            confidence = min(1.0, hh_count / 3)
+        elif ll_count > hh_count and ll_count >= 1:
+            pattern = "LL"
+            strength = min(5, ll_count + 1)
+            confidence = min(1.0, ll_count / 3)
+        else:
+            pattern = "MIXED"
+            strength = 0
+            confidence = 0.0
+        
+        return pattern, strength, round(confidence, 2)
+    
+    def _calculate_bollinger_position(self, period: int = 20, std_mult: float = 2.0) -> Tuple[str, float]:
+        """
+        Calculate current price position relative to Bollinger Bands.
+        
+        Args:
+            period: Period for moving average
+            std_mult: Standard deviation multiplier
+            
+        Returns:
+            Tuple of (position, strength)
+            - position: "ABOVE_UPPER", "NEAR_UPPER", "MIDDLE", "NEAR_LOWER", "BELOW_LOWER"
+            - strength: 0.0 to 1.0 (how far from middle band)
+        """
+        if len(self.tick_history) < period:
+            return "MIDDLE", 0.0
+        
+        recent = self.tick_history[-period:]
+        current_price = safe_float(self.tick_history[-1])
+        
+        sma = safe_divide(sum(recent), len(recent), current_price)
+        
+        variance = safe_divide(sum((p - sma) ** 2 for p in recent), len(recent), 0.0)
+        std_dev = variance ** 0.5
+        
+        upper_band = sma + (std_mult * std_dev)
+        lower_band = sma - (std_mult * std_dev)
+        
+        band_width = upper_band - lower_band
+        if band_width <= 0:
+            return "MIDDLE", 0.0
+        
+        position_pct = safe_divide((current_price - lower_band), band_width, 0.5)
+        
+        if position_pct >= 1.0:
+            position = "ABOVE_UPPER"
+            strength = min(1.0, position_pct - 1.0 + 0.5)
+        elif position_pct >= 0.85:
+            position = "NEAR_UPPER"
+            strength = (position_pct - 0.5) * 2
+        elif position_pct <= 0.0:
+            position = "BELOW_LOWER"
+            strength = min(1.0, abs(position_pct) + 0.5)
+        elif position_pct <= 0.15:
+            position = "NEAR_LOWER"
+            strength = (0.5 - position_pct) * 2
+        else:
+            position = "MIDDLE"
+            strength = abs(0.5 - position_pct) * 2
+        
+        return position, round(min(1.0, strength), 2)
+    
+    def predict_tick_direction(self, look_ahead: int = 5) -> Tuple[str, float]:
+        """Enhanced Tick Direction Predictor v3.0 for next 5-10 ticks.
+        
+        Analyzes multiple factors to predict short-term price direction:
+        1. Momentum Analysis: Price acceleration/deceleration (20%)
+        2. Tick Sequence Pattern: Consecutive up/down ticks (15%)
+        3. EMA Slope Strength: Trend direction from EMA (12%)
+        4. MACD Momentum: Histogram direction and strength (12%)
+        5. Stochastic Direction: K/D crossover direction (8%)
+        6. ADX Trend Confirmation: Strong trend = higher confidence (8%)
+        7. Rate of Change (ROC): Price momentum indicator (8%)
+        8. Price Velocity: Multi-period velocity analysis (7%)
+        9. Higher Highs/Lower Lows: Trend structure (5%)
+        10. Bollinger Band Position: Overbought/oversold detection (5%)
+        
+        Args:
+            look_ahead: Number of ticks to predict ahead (default 5, max 10)
             
         Returns:
             Tuple of (direction, confidence)
@@ -1466,44 +1677,53 @@ class TradingStrategy:
         down_score = 0.0
         total_weight = 0.0
         prediction_factors = []
+        weights = self.PREDICTION_WEIGHTED_FACTORS
         
-        momentum_weight = 0.25
+        momentum_weight = weights.get('momentum', 0.20)
         total_weight += momentum_weight
         
         lookback = min(self.PREDICTION_MOMENTUM_LOOKBACK, len(self.tick_history) - 1)
         if lookback >= 3:
             recent_ticks = self.tick_history[-lookback:]
-            
             price_changes = [recent_ticks[i] - recent_ticks[i-1] for i in range(1, len(recent_ticks))]
             
             if len(price_changes) >= 2:
-                first_half = price_changes[:len(price_changes)//2]
-                second_half = price_changes[len(price_changes)//2:]
+                third_len = max(1, len(price_changes) // 3)
+                first_third = price_changes[:third_len]
+                second_third = price_changes[third_len:2*third_len]
+                last_third = price_changes[2*third_len:]
                 
-                first_avg = safe_divide(sum(first_half), len(first_half), 0.0)
-                second_avg = safe_divide(sum(second_half), len(second_half), 0.0)
+                first_avg = safe_divide(sum(first_third), len(first_third), 0.0)
+                second_avg = safe_divide(sum(second_third), len(second_third), 0.0) if second_third else first_avg
+                last_avg = safe_divide(sum(last_third), len(last_third), 0.0) if last_third else second_avg
                 
-                acceleration = second_avg - first_avg
+                accel_1 = second_avg - first_avg
+                accel_2 = last_avg - second_avg
+                total_accel = accel_1 + accel_2
                 
                 avg_change = safe_divide(sum(abs(c) for c in price_changes), len(price_changes), 0.001)
-                normalized_accel = safe_divide(acceleration, avg_change, 0.0)
+                normalized_accel = safe_divide(total_accel, avg_change, 0.0)
                 
-                if normalized_accel > 0.3:
-                    up_score += momentum_weight * min(1.0, normalized_accel)
-                    prediction_factors.append(f"Momentum UP ({normalized_accel:.2f})")
-                elif normalized_accel < -0.3:
-                    down_score += momentum_weight * min(1.0, abs(normalized_accel))
-                    prediction_factors.append(f"Momentum DOWN ({normalized_accel:.2f})")
+                recent_bias = sum(price_changes[-5:]) if len(price_changes) >= 5 else sum(price_changes)
+                
+                if normalized_accel > 0.2 or (normalized_accel > 0 and recent_bias > 0):
+                    strength = min(1.0, abs(normalized_accel) * 0.8 + 0.2)
+                    up_score += momentum_weight * strength
+                    prediction_factors.append(f"🚀 Momentum UP ({normalized_accel:.2f})")
+                elif normalized_accel < -0.2 or (normalized_accel < 0 and recent_bias < 0):
+                    strength = min(1.0, abs(normalized_accel) * 0.8 + 0.2)
+                    down_score += momentum_weight * strength
+                    prediction_factors.append(f"📉 Momentum DOWN ({normalized_accel:.2f})")
                 else:
                     net_change = sum(price_changes)
                     if net_change > 0:
-                        up_score += momentum_weight * 0.3
-                        prediction_factors.append(f"Net momentum UP")
+                        up_score += momentum_weight * 0.4
+                        prediction_factors.append(f"Net UP")
                     elif net_change < 0:
-                        down_score += momentum_weight * 0.3
-                        prediction_factors.append(f"Net momentum DOWN")
+                        down_score += momentum_weight * 0.4
+                        prediction_factors.append(f"Net DOWN")
         
-        sequence_weight = 0.20
+        sequence_weight = weights.get('sequence', 0.15)
         total_weight += sequence_weight
         
         seq_lookback = min(self.PREDICTION_SEQUENCE_LOOKBACK, len(self.tick_history) - 1)
@@ -1530,19 +1750,21 @@ class TradingStrategy:
             down_ticks = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
             
             if consecutive_up >= 3:
-                up_score += sequence_weight * min(1.0, consecutive_up / 5)
-                prediction_factors.append(f"Consec UP ({consecutive_up})")
+                strength = min(1.0, consecutive_up / 4)
+                up_score += sequence_weight * strength
+                prediction_factors.append(f"⬆️ Consec UP ({consecutive_up})")
             elif consecutive_down >= 3:
-                down_score += sequence_weight * min(1.0, consecutive_down / 5)
-                prediction_factors.append(f"Consec DOWN ({consecutive_down})")
+                strength = min(1.0, consecutive_down / 4)
+                down_score += sequence_weight * strength
+                prediction_factors.append(f"⬇️ Consec DOWN ({consecutive_down})")
             elif up_ticks > down_ticks + 2:
-                up_score += sequence_weight * 0.5
+                up_score += sequence_weight * 0.6
                 prediction_factors.append(f"Pattern UP ({up_ticks}/{down_ticks})")
             elif down_ticks > up_ticks + 2:
-                down_score += sequence_weight * 0.5
+                down_score += sequence_weight * 0.6
                 prediction_factors.append(f"Pattern DOWN ({down_ticks}/{up_ticks})")
         
-        ema_weight = 0.20
+        ema_weight = weights.get('ema_slope', 0.12)
         total_weight += ema_weight
         
         if indicators.ema_fast > 0 and indicators.ema_slow > 0:
@@ -1552,24 +1774,18 @@ class TradingStrategy:
             slope_direction = slope_data.get('direction', 'flat')
             slope_strength = slope_data.get('strength', 'neutral')
             
+            strength_mult = 1.0 if slope_strength == 'strong' else 0.7 if slope_strength == 'moderate' else 0.4
+            
             if indicators.ema_fast > indicators.ema_slow:
-                strength_mult = 1.0 if slope_strength == 'strong' else 0.7 if slope_strength == 'moderate' else 0.4
-                if slope_direction == 'bullish':
+                if slope_direction in ['bullish', 'flat']:
                     up_score += ema_weight * strength_mult
-                    prediction_factors.append(f"EMA bullish ({ema_diff_pct:.3f}%)")
-                elif slope_direction == 'flat':
-                    up_score += ema_weight * 0.3
-                    prediction_factors.append(f"EMA flat-bullish")
+                    prediction_factors.append(f"EMA bullish")
             elif indicators.ema_fast < indicators.ema_slow:
-                strength_mult = 1.0 if slope_strength == 'strong' else 0.7 if slope_strength == 'moderate' else 0.4
-                if slope_direction == 'bearish':
+                if slope_direction in ['bearish', 'flat']:
                     down_score += ema_weight * strength_mult
-                    prediction_factors.append(f"EMA bearish ({ema_diff_pct:.3f}%)")
-                elif slope_direction == 'flat':
-                    down_score += ema_weight * 0.3
-                    prediction_factors.append(f"EMA flat-bearish")
+                    prediction_factors.append(f"EMA bearish")
         
-        macd_weight = 0.15
+        macd_weight = weights.get('macd', 0.12)
         total_weight += macd_weight
         
         if indicators.macd_histogram != 0:
@@ -1578,50 +1794,51 @@ class TradingStrategy:
             macd_signal = indicators.macd_signal
             
             histogram_positive = macd_hist > 0
-            histogram_increasing = len(self._macd_values_cache) >= 2 and (
-                self._macd_values_cache[-1] > self._macd_values_cache[-2] if len(self._macd_values_cache) >= 2 else False
-            )
+            histogram_increasing = False
+            if len(self._macd_values_cache) >= 3:
+                recent_macd = self._macd_values_cache[-3:]
+                histogram_increasing = recent_macd[-1] > recent_macd[-2] > recent_macd[-3]
             
             if histogram_positive:
-                strength = min(1.0, abs(macd_hist) * 1000)
-                up_score += macd_weight * (0.7 + 0.3 * strength)
-                prediction_factors.append(f"MACD+ ({macd_hist:.6f})")
+                strength = min(1.0, abs(macd_hist) * 800 + 0.3)
+                if histogram_increasing:
+                    strength = min(1.0, strength + 0.2)
+                up_score += macd_weight * strength
+                prediction_factors.append(f"MACD+")
             else:
-                strength = min(1.0, abs(macd_hist) * 1000)
-                down_score += macd_weight * (0.7 + 0.3 * strength)
-                prediction_factors.append(f"MACD- ({macd_hist:.6f})")
+                strength = min(1.0, abs(macd_hist) * 800 + 0.3)
+                down_score += macd_weight * strength
+                prediction_factors.append(f"MACD-")
             
             if macd_line > macd_signal and histogram_positive:
-                up_score += macd_weight * 0.2
+                up_score += macd_weight * 0.15
             elif macd_line < macd_signal and not histogram_positive:
-                down_score += macd_weight * 0.2
+                down_score += macd_weight * 0.15
         
-        stoch_weight = 0.10
+        stoch_weight = weights.get('stoch', 0.08)
         total_weight += stoch_weight
         
         stoch_k = indicators.stoch_k
         stoch_d = indicators.stoch_d
         
         if stoch_k > stoch_d:
-            if stoch_k < 30:
+            if stoch_k < 25:
                 up_score += stoch_weight * 1.0
-                prediction_factors.append(f"Stoch bullish cross OS ({stoch_k:.1f})")
+                prediction_factors.append(f"Stoch OS cross ({stoch_k:.0f})")
             elif stoch_k < 50:
                 up_score += stoch_weight * 0.7
-                prediction_factors.append(f"Stoch bullish ({stoch_k:.1f})")
             else:
                 up_score += stoch_weight * 0.4
         elif stoch_k < stoch_d:
-            if stoch_k > 70:
+            if stoch_k > 75:
                 down_score += stoch_weight * 1.0
-                prediction_factors.append(f"Stoch bearish cross OB ({stoch_k:.1f})")
+                prediction_factors.append(f"Stoch OB cross ({stoch_k:.0f})")
             elif stoch_k > 50:
                 down_score += stoch_weight * 0.7
-                prediction_factors.append(f"Stoch bearish ({stoch_k:.1f})")
             else:
                 down_score += stoch_weight * 0.4
         
-        adx_weight = 0.10
+        adx_weight = weights.get('adx', 0.08)
         total_weight += adx_weight
         
         adx = indicators.adx
@@ -1629,21 +1846,69 @@ class TradingStrategy:
         minus_di = indicators.minus_di
         
         if adx >= self.ADX_STRONG_TREND:
-            trend_strength = min(1.0, adx / 40)
-            
+            trend_strength = min(1.0, adx / 35)
             if plus_di > minus_di:
                 up_score += adx_weight * trend_strength
-                prediction_factors.append(f"ADX bullish ({adx:.1f}, +DI>{'-'}DI)")
+                prediction_factors.append(f"ADX bullish ({adx:.0f})")
             elif minus_di > plus_di:
                 down_score += adx_weight * trend_strength
-                prediction_factors.append(f"ADX bearish ({adx:.1f}, -DI>{'+'}DI)")
+                prediction_factors.append(f"ADX bearish ({adx:.0f})")
         elif adx >= self.ADX_WEAK_TREND:
             if plus_di > minus_di + 5:
                 up_score += adx_weight * 0.5
-                prediction_factors.append(f"ADX weak bullish ({adx:.1f})")
             elif minus_di > plus_di + 5:
                 down_score += adx_weight * 0.5
-                prediction_factors.append(f"ADX weak bearish ({adx:.1f})")
+        
+        roc_weight = weights.get('roc', 0.08)
+        total_weight += roc_weight
+        
+        roc = self._calculate_rate_of_change(self.PREDICTION_ROC_LOOKBACK)
+        if roc > 0.02:
+            strength = min(1.0, abs(roc) * 10 + 0.3)
+            up_score += roc_weight * strength
+            prediction_factors.append(f"ROC+ ({roc:.3f})")
+        elif roc < -0.02:
+            strength = min(1.0, abs(roc) * 10 + 0.3)
+            down_score += roc_weight * strength
+            prediction_factors.append(f"ROC- ({roc:.3f})")
+        
+        velocity_weight = weights.get('velocity', 0.07)
+        total_weight += velocity_weight
+        
+        avg_velocity, acceleration, trend_quality = self._calculate_price_velocity()
+        if avg_velocity > 0 and (acceleration > 0 or trend_quality in ["STRONG", "MODERATE"]):
+            strength = 0.8 if trend_quality == "STRONG" else 0.6 if trend_quality == "MODERATE" else 0.4
+            up_score += velocity_weight * strength
+            prediction_factors.append(f"Vel+ ({trend_quality[:3]})")
+        elif avg_velocity < 0 and (acceleration < 0 or trend_quality in ["STRONG", "MODERATE"]):
+            strength = 0.8 if trend_quality == "STRONG" else 0.6 if trend_quality == "MODERATE" else 0.4
+            down_score += velocity_weight * strength
+            prediction_factors.append(f"Vel- ({trend_quality[:3]})")
+        
+        hh_ll_weight = weights.get('hh_ll', 0.05)
+        total_weight += hh_ll_weight
+        
+        pattern, strength, pattern_conf = self._detect_higher_highs_lower_lows(self.PREDICTION_HIGHER_HIGHS_LOOKBACK)
+        if pattern == "HH" and pattern_conf > 0.3:
+            up_score += hh_ll_weight * pattern_conf
+            prediction_factors.append(f"HH ({strength})")
+        elif pattern == "LL" and pattern_conf > 0.3:
+            down_score += hh_ll_weight * pattern_conf
+            prediction_factors.append(f"LL ({strength})")
+        
+        bb_weight = weights.get('bollinger', 0.05)
+        total_weight += bb_weight
+        
+        bb_position, bb_strength = self._calculate_bollinger_position(
+            self.PREDICTION_BOLLINGER_PERIOD, self.PREDICTION_BOLLINGER_STD
+        )
+        
+        if bb_position in ["BELOW_LOWER", "NEAR_LOWER"]:
+            up_score += bb_weight * bb_strength
+            prediction_factors.append(f"BB oversold")
+        elif bb_position in ["ABOVE_UPPER", "NEAR_UPPER"]:
+            down_score += bb_weight * bb_strength
+            prediction_factors.append(f"BB overbought")
         
         if total_weight > 0:
             up_normalized = safe_divide(up_score, total_weight, 0.0)
@@ -1663,21 +1928,27 @@ class TradingStrategy:
         else:
             direction = "UP" if indicators.trend_direction == "UP" else "DOWN"
             score_diff = 0.0
-            raw_confidence = 0.3
+            raw_confidence = 0.35
         
-        confidence = min(1.0, raw_confidence * (1 + score_diff * 0.5))
+        confidence = min(1.0, raw_confidence * (1 + score_diff * 0.6))
         
         if adx >= self.ADX_STRONG_TREND:
-            confidence = min(1.0, confidence * 1.15)
+            confidence = min(1.0, confidence * 1.18)
         elif adx < self.ADX_NO_TREND:
-            confidence = confidence * 0.85
+            confidence = confidence * 0.82
+        
+        factor_count = len(prediction_factors)
+        if factor_count >= 6:
+            confidence = min(1.0, confidence * 1.12)
+        elif factor_count >= 4:
+            confidence = min(1.0, confidence * 1.05)
         
         confidence = max(0.0, min(1.0, confidence))
         
-        logger.debug(
-            f"🎯 Tick Prediction: {direction} (conf={confidence:.2f}) | "
-            f"UP={up_score:.3f} DOWN={down_score:.3f} | "
-            f"Factors: {', '.join(prediction_factors[:4])}"
+        logger.info(
+            f"🎯 Prediction v3: {direction} (conf={confidence:.1%}) | "
+            f"UP={up_normalized:.2f} DOWN={down_normalized:.2f} | "
+            f"Factors: {', '.join(prediction_factors[:5])}"
         )
         
         return direction, round(confidence, 3)

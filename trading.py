@@ -25,9 +25,9 @@ Enhancement v2.1:
 - Trade journal CSV validation with atomic writes
 
 Enhancement v2.2:
-- Simplified Recovery Martingale with fixed 2.1x multiplier
+- Simplified Recovery Martingale with fixed 2.0x multiplier
 - Clear recovery logging with cumulative loss tracking
-- Max 5 levels then STOP trading (no reset)
+- Max 5 levels then STOP trading (no reset) - user requested
 =============================================================
 """
 
@@ -251,7 +251,7 @@ class TradingManager:
     """
     
     MARTINGALE_MULTIPLIER = 2.0  # Reduced from 2.1 for better risk management
-    MAX_MARTINGALE_LEVEL = 3  # Reduced from 4 to limit exposure even more
+    MAX_MARTINGALE_LEVEL = 5  # Increased to 5 levels for better recovery chance (user requested)
     
     MAX_LOSS_PERCENT = 0.15  # Reduced from 0.20 for more conservative risk
     MAX_CONSECUTIVE_LOSSES = 5  # Allow 5 consecutive losses before stopping (user requested)
