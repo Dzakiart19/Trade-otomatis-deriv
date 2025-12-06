@@ -1379,6 +1379,56 @@ class TradingManager:
             logger.info(f"📊 Session summary saved to: {summary_file}")
         except Exception as e:
             logger.error(f"Failed to save session summary: {e}")
+    
+    def _cleanup_session_logs(self):
+        """
+        Hapus file log lama untuk menghemat penyimpanan.
+        Dipanggil setelah session trading selesai.
+        
+        File yang dihapus:
+        - analytics_*.json
+        - session_*.txt
+        - trades_*.csv
+        - errors.log
+        
+        File yang TIDAK dihapus (essential):
+        - active_chat_id.txt
+        - chat_mapping.json
+        - session_recovery.json
+        - user_sessions.json
+        """
+        import glob as glob_module
+        
+        try:
+            deleted_count = 0
+            
+            patterns_to_delete = [
+                os.path.join(LOGS_DIR, "analytics_*.json"),
+                os.path.join(LOGS_DIR, "session_*.txt"),
+                os.path.join(LOGS_DIR, "trades_*.csv"),
+            ]
+            
+            for pattern in patterns_to_delete:
+                for filepath in glob_module.glob(pattern):
+                    try:
+                        os.remove(filepath)
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {filepath}: {e}")
+            
+            errors_log = os.path.join(LOGS_DIR, "errors.log")
+            if os.path.exists(errors_log):
+                try:
+                    os.remove(errors_log)
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete errors.log: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"🧹 Cleaned up {deleted_count} old log files")
+            
+        except Exception as e:
+            logger.error(f"Error during log cleanup: {e}")
             
     def _check_and_execute_signal(self):
         """
@@ -1929,6 +1979,9 @@ class TradingManager:
         
         # Generate summary BEFORE reset
         summary = self._generate_session_summary()
+        
+        # Cleanup old log files untuk hemat penyimpanan
+        self._cleanup_session_logs()
         
         # Reset ALL state untuk session baru yang bersih
         # Reset martingale state
