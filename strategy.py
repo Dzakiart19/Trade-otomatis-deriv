@@ -269,18 +269,19 @@ class TradingStrategy:
     PREDICTION_BOLLINGER_PERIOD = 20  # Bollinger Bands period
     PREDICTION_BOLLINGER_STD = 2.0  # Bollinger Bands standard deviation multiplier
     PREDICTION_WEIGHTED_FACTORS = {
-        'momentum': 0.16,  # Reduced from 0.18 for HMA
-        'sequence': 0.12,  # Reduced from 0.13 for HMA
-        'ema_slope': 0.10,  # Reduced from 0.11 for HMA
-        'macd': 0.10,  # Reduced from 0.11 for HMA
-        'stoch': 0.07,  # Reduced from 0.08 for HMA
-        'adx': 0.07,  # Reduced from 0.08 for HMA
-        'roc': 0.06,  # Reduced from 0.07 for HMA
+        'momentum': 0.15,  # Reduced from 0.16 for tick_imbalance
+        'sequence': 0.11,  # Reduced from 0.12 for tick_imbalance
+        'ema_slope': 0.09,  # Reduced from 0.10 for tick_imbalance
+        'macd': 0.09,  # Reduced from 0.10 for tick_imbalance
+        'stoch': 0.06,  # Reduced from 0.07 for tick_imbalance
+        'adx': 0.06,  # Reduced from 0.07 for tick_imbalance
+        'roc': 0.06,  # Same
         'velocity': 0.06,  # Same
         'hh_ll': 0.05,  # Same
         'bollinger': 0.05,  # Same
         'zscore': 0.08,  # Mean reversion z-score factor
-        'hma': 0.08,  # NEW: Hull Moving Average for smoother trend
+        'hma': 0.07,  # Reduced from 0.08 for tick_imbalance
+        'tick_imbalance': 0.07,  # NEW: Tick imbalance ratio for micro-momentum
     }
     
     # Multi-Horizon Prediction v4.0 - Consensus-based direction prediction
@@ -297,6 +298,7 @@ class TradingStrategy:
     ZSCORE_WEIGHT = 0.30  # Updated to match actual usage in _predict_single_horizon
     
     HMA_PERIOD = 16  # Hull Moving Average period
+    TICK_IMBALANCE_LOOKBACK = 20  # Number of ticks to analyze for tick imbalance
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -613,6 +615,81 @@ class TradingStrategy:
             slope_confidence = min(1.0, abs(slope_pct) / 0.05)
             price_confirm = 0.2 if details['price_vs_hma'] == 'BELOW' else 0.0
             confidence = min(1.0, 0.3 + slope_confidence * 0.5 + price_confirm)
+        else:
+            direction = "NEUTRAL"
+            confidence = 0.0
+        
+        return direction, round(confidence, 3), details
+    
+    def calculate_tick_imbalance(self, lookback: int = 20) -> Tuple[str, float, Dict[str, Any]]:
+        """Calculate tick imbalance ratio to detect micro-momentum.
+        
+        Counts up-ticks vs down-ticks in the lookback period.
+        - Imbalance > 0.60 = UP momentum (more up-ticks)
+        - Imbalance < 0.40 = DOWN momentum (more down-ticks)
+        - Between 0.40-0.60 = NEUTRAL (balanced)
+        
+        Args:
+            lookback: Number of ticks to analyze (default: 20)
+        
+        Returns:
+            Tuple of (direction, confidence, details)
+            - direction: "UP", "DOWN", or "NEUTRAL"
+            - confidence: 0.0 to 1.0
+            - details: Dict with imbalance metrics
+        """
+        details = {
+            'up_ticks': 0,
+            'down_ticks': 0,
+            'unchanged': 0,
+            'total_moves': 0,
+            'up_ratio': 0.5,
+            'imbalance': 0.0
+        }
+        
+        min_required = lookback + 1
+        if len(self.tick_history) < min_required:
+            return "NEUTRAL", 0.0, details
+        
+        recent = self.tick_history[-min_required:]
+        
+        up_count = 0
+        down_count = 0
+        unchanged = 0
+        
+        for i in range(1, len(recent)):
+            curr_price = safe_float(recent[i])
+            prev_price = safe_float(recent[i - 1])
+            
+            if curr_price > prev_price:
+                up_count += 1
+            elif curr_price < prev_price:
+                down_count += 1
+            else:
+                unchanged += 1
+        
+        total_moves = up_count + down_count
+        
+        details['up_ticks'] = up_count
+        details['down_ticks'] = down_count
+        details['unchanged'] = unchanged
+        details['total_moves'] = total_moves
+        
+        if total_moves == 0:
+            return "NEUTRAL", 0.0, details
+        
+        up_ratio = safe_divide(up_count, total_moves, 0.5)
+        details['up_ratio'] = round(up_ratio, 3)
+        details['imbalance'] = round(abs(up_ratio - 0.5) * 2, 3)
+        
+        if up_ratio > 0.60:
+            direction = "UP"
+            excess = up_ratio - 0.60
+            confidence = min(1.0, 0.3 + (excess / 0.40) * 0.7)
+        elif up_ratio < 0.40:
+            direction = "DOWN"
+            excess = 0.40 - up_ratio
+            confidence = min(1.0, 0.3 + (excess / 0.40) * 0.7)
         else:
             direction = "NEUTRAL"
             confidence = 0.0
@@ -1988,16 +2065,28 @@ class TradingStrategy:
                 down_score += zscore_contribution
                 details['factors'].append(f"ZS↓{zscore_details['zscore']:.2f}")
         
-        # HMA Direction Factor (weight 0.08, matching PREDICTION_WEIGHTED_FACTORS['hma'])
+        # HMA Direction Factor (weight 0.07, matching PREDICTION_WEIGHTED_FACTORS['hma'])
         hma_dir, hma_conf, hma_details = self.calculate_hma_direction(self.HMA_PERIOD, lookback=horizon + 2)
         if hma_dir != "NEUTRAL" and hma_conf > 0.3:
-            hma_contribution = 0.08 * hma_conf
+            hma_contribution = 0.07 * hma_conf
             if hma_dir == "UP":
                 up_score += hma_contribution
                 details['factors'].append(f"HMA↑{hma_details['slope']:.3f}%")
             elif hma_dir == "DOWN":
                 down_score += hma_contribution
                 details['factors'].append(f"HMA↓{hma_details['slope']:.3f}%")
+        
+        # Tick Imbalance Factor (weight 0.07, matching PREDICTION_WEIGHTED_FACTORS['tick_imbalance'])
+        tick_imb_lookback = max(self.TICK_IMBALANCE_LOOKBACK, horizon * 4)
+        tick_imb_dir, tick_imb_conf, tick_imb_details = self.calculate_tick_imbalance(tick_imb_lookback)
+        if tick_imb_dir != "NEUTRAL" and tick_imb_conf > 0.3:
+            tick_imb_contribution = 0.07 * tick_imb_conf
+            if tick_imb_dir == "UP":
+                up_score += tick_imb_contribution
+                details['factors'].append(f"TI↑{tick_imb_details['up_ratio']:.2f}")
+            elif tick_imb_dir == "DOWN":
+                down_score += tick_imb_contribution
+                details['factors'].append(f"TI↓{tick_imb_details['up_ratio']:.2f}")
         
         if up_score > down_score and up_score > 0.15:
             direction = "UP"
