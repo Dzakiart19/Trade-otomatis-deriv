@@ -94,8 +94,10 @@ class DerivWebSocket:
         self._validate_tokens()
         
         # Ambil APP_ID dari environment atau gunakan default
-        app_id = os.environ.get("DERIV_APP_ID", "1089")
+        app_id = os.environ.get("DERIV_APP_ID", "").strip() or "1089"
         self.ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+        if not os.environ.get("DERIV_APP_ID", "").strip():
+            logger.warning("⚠️ DERIV_APP_ID not set or empty, using default: 1089")
         logger.info(f"Using Deriv App ID: {app_id}")
         
         # Status koneksi
@@ -757,14 +759,24 @@ class DerivWebSocket:
         yang sudah expired (lebih dari PENDING_REQUEST_TIMEOUT detik).
         
         Dipanggil secara periodic dari health check loop.
+        
+        Telemetry Enhancement v2.4:
+        - Logs cleanup statistics at INFO level when expired requests found
+        - Logs WARNING if pending queue grows above threshold
+        - Tracks oldest pending request age for monitoring
         """
         current_time = time.time()
         expired_requests = []
+        oldest_age = 0.0
+        total_pending = 0
         
         with self.lock:
+            total_pending = len(self.pending_requests)
+            
             for req_id, req_data in self.pending_requests.items():
                 if isinstance(req_data, dict) and "timestamp" in req_data:
                     elapsed = current_time - req_data["timestamp"]
+                    oldest_age = max(oldest_age, elapsed)
                     if elapsed > self.PENDING_REQUEST_TIMEOUT:
                         expired_requests.append(req_id)
                 elif isinstance(req_data, dict):
@@ -774,7 +786,21 @@ class DerivWebSocket:
                 self.pending_requests.pop(req_id, None)
         
         if expired_requests:
-            logger.debug(f"🧹 Cleaned up {len(expired_requests)} expired pending request(s)")
+            logger.info(
+                f"🧹 Pending request cleanup: removed {len(expired_requests)} expired request(s), "
+                f"{total_pending - len(expired_requests)} remaining, "
+                f"oldest_age={oldest_age:.1f}s"
+            )
+        
+        if total_pending - len(expired_requests) > 50:
+            logger.warning(
+                f"⚠️ High pending request count: {total_pending - len(expired_requests)} requests in queue. "
+                f"Consider checking for slow responses or network issues."
+            )
+        elif total_pending > 0:
+            logger.debug(
+                f"📊 Pending requests: {total_pending} in queue, oldest_age={oldest_age:.1f}s"
+            )
     
     def _attempt_reconnect(self):
         """
