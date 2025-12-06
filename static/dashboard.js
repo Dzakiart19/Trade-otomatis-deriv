@@ -1,3 +1,7 @@
+if (window['chartjs-plugin-annotation']) {
+    Chart.register(window['chartjs-plugin-annotation']);
+}
+
 class TradingDashboard {
     constructor() {
         this.ws = null;
@@ -9,6 +13,7 @@ class TradingDashboard {
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 2000;
         this.authToken = null;
+        this.pendingEntryMarkers = {};
         
         this.symbols = [
             'R_100', 'R_75', 'R_50', 'R_25', 'R_10',
@@ -437,12 +442,60 @@ class TradingDashboard {
     
     markEntryPoint(symbol, entryPrice) {
         const priceData = this.priceData[symbol];
-        if (!priceData) return;
         
-        priceData.entryIndex = priceData.prices.length > 0 ? priceData.prices.length - 1 : 0;
+        if (!priceData || priceData.prices.length === 0) {
+            this.pendingEntryMarkers[symbol] = entryPrice;
+            this.updateChartCardIndicator(symbol);
+            return;
+        }
+        
+        priceData.entryIndex = priceData.prices.length - 1;
         priceData.entryPrice = entryPrice;
         
+        delete this.pendingEntryMarkers[symbol];
+        
         this.updateChartEntryMarkers(symbol);
+        this.updateChartCardIndicator(symbol);
+    }
+    
+    processPendingEntryMarkers(symbol) {
+        if (this.pendingEntryMarkers[symbol]) {
+            const entryPrice = this.pendingEntryMarkers[symbol];
+            this.markEntryPoint(symbol, entryPrice);
+        }
+    }
+    
+    updateChartCardIndicator(symbol) {
+        const chartCard = document.querySelector(`.chart-card[data-symbol="${symbol}"]`);
+        if (!chartCard) return;
+        
+        const existingIndicator = chartCard.querySelector('.position-indicator');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+        
+        chartCard.classList.remove('has-position', 'put');
+        
+        const position = this.getPositionForSymbol(symbol);
+        
+        if (position) {
+            const direction = position.direction.toLowerCase();
+            chartCard.classList.add('has-position');
+            if (direction === 'put') {
+                chartCard.classList.add('put');
+            }
+            
+            const indicator = document.createElement('div');
+            indicator.className = `position-indicator ${direction}`;
+            indicator.textContent = direction === 'call' ? 'CALL' : 'PUT';
+            chartCard.appendChild(indicator);
+        }
+    }
+    
+    updateAllChartCardIndicators() {
+        this.symbols.forEach(symbol => {
+            this.updateChartCardIndicator(symbol);
+        });
     }
     
     connectWebSocket() {
@@ -539,6 +592,12 @@ class TradingDashboard {
         if (snapshot.open_positions) {
             this.positions = snapshot.open_positions;
             this.renderPositions();
+            
+            Object.values(this.positions).forEach(pos => {
+                this.markEntryPoint(pos.symbol, pos.entry_price);
+            });
+            
+            this.updateAllChartCardIndicators();
         }
         
         if (snapshot.trade_history) {
@@ -587,15 +646,32 @@ class TradingDashboard {
         data.prices.push(price);
         
         const maxPoints = 60;
+        let shifted = false;
         if (data.labels.length > maxPoints) {
             data.labels.shift();
             data.prices.shift();
+            shifted = true;
+            
+            if (data.entryIndex !== null) {
+                data.entryIndex--;
+                if (data.entryIndex < 0) {
+                    data.entryIndex = null;
+                }
+            }
         }
         
         if (this.charts[symbol]) {
             this.charts[symbol].data.labels = data.labels;
             this.charts[symbol].data.datasets[0].data = data.prices;
-            this.charts[symbol].update('none');
+            
+            this.processPendingEntryMarkers(symbol);
+            
+            const position = this.getPositionForSymbol(symbol);
+            if (position) {
+                this.updateChartEntryMarkers(symbol);
+            } else {
+                this.charts[symbol].update('none');
+            }
         }
         
         const priceEl = document.getElementById(`price-${symbol}`);
@@ -615,6 +691,7 @@ class TradingDashboard {
         switch (data.type) {
             case 'position_open':
                 this.positions[data.contract_id] = data;
+                this.markEntryPoint(data.symbol, data.entry_price);
                 break;
             case 'position_update':
                 if (this.positions[data.contract_id]) {
@@ -626,7 +703,12 @@ class TradingDashboard {
                 }
                 break;
             case 'position_close':
+                const closedSymbol = this.positions[data.contract_id]?.symbol;
                 delete this.positions[data.contract_id];
+                if (closedSymbol) {
+                    this.updateChartEntryMarkers(closedSymbol);
+                    this.updateChartCardIndicator(closedSymbol);
+                }
                 break;
         }
         this.renderPositions();

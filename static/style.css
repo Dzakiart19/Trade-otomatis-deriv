@@ -155,11 +155,51 @@ section h2 {
     padding: 12px;
     border: 1px solid var(--border-color);
     transition: transform 0.2s, box-shadow 0.2s;
+    position: relative;
 }
 
 .chart-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 20px rgba(0, 212, 255, 0.1);
+}
+
+.chart-card.has-position {
+    border: 2px solid var(--accent-green);
+    box-shadow: 0 0 15px rgba(0, 255, 136, 0.2);
+}
+
+.chart-card.has-position.put {
+    border-color: var(--accent-red);
+    box-shadow: 0 0 15px rgba(255, 71, 87, 0.2);
+}
+
+.chart-card .position-indicator {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    animation: pulse-glow 2s infinite;
+}
+
+.chart-card .position-indicator.call {
+    background: rgba(0, 255, 136, 0.2);
+    color: var(--accent-green);
+    border: 1px solid var(--accent-green);
+}
+
+.chart-card .position-indicator.put {
+    background: rgba(255, 71, 87, 0.2);
+    color: var(--accent-red);
+    border: 1px solid var(--accent-red);
+}
+
+@keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
 }
 
 .chart-header {
