@@ -235,7 +235,7 @@ class TradingStrategy:
     MIN_CONFLUENCE_SCORE = 40  # Balanced: was 20, now 40 for better signal quality (0-100 scale)
     
     ADX_DIRECTIONAL_CONFLICT_THRESHOLD = 15  # HARD BLOCK if DI diff > 15 (gives some tolerance)
-    BLOCK_EXTREME_VOLATILITY = True  # HARD BLOCK on EXTREME_HIGH volatility
+    BLOCK_EXTREME_VOLATILITY = False  # DISABLED - synthetic indices have naturally high volatility
     BLOCK_EMA_SLOPE_CONFLICT = False  # Soft warning only - don't hard block EMA slope
     
     def __init__(self):
