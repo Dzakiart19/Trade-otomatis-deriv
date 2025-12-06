@@ -29,7 +29,7 @@ Do not make changes to the file `Y`.
 - **Risk Management**:
     - Max Session Loss (20% of initial balance).
     - Max Consecutive Losses (5x).
-    - Daily Loss Limit ($50 USD).
+    - Daily Loss Limit ($50 USD) - **HANYA aktif untuk akun REAL, skip untuk DEMO**.
     - Balance Check before each trade.
     - Exponential backoff for retries.
     - Auto-Adjust Stake: Dynamically calculates and caps stake to a safe value based on projected Martingale exposure, preventing stops until balance falls below minimum stake.

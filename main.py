@@ -1259,12 +1259,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [
-                InlineKeyboardButton("$0.50 | 5t | 5x", callback_data="exec~R_100~5t~050~5"),
-                InlineKeyboardButton("$0.50 | 5t | 10x", callback_data="exec~R_100~5t~050~10")
+                InlineKeyboardButton("$0.50 | 5x", callback_data="exec~R_100~5t~050~5"),
+                InlineKeyboardButton("$1 | 5x", callback_data="exec~R_100~5t~1~5")
             ],
             [
-                InlineKeyboardButton("$1 | 5t | 5x", callback_data="exec~R_100~5t~1~5"),
-                InlineKeyboardButton("$0.50 | 5t | ∞", callback_data="exec~R_100~5t~050~0")
+                InlineKeyboardButton("$2 | 5x", callback_data="exec~R_100~5t~2~5"),
+                InlineKeyboardButton("$5 | 5x", callback_data="exec~R_100~5t~5~5")
+            ],
+            [
+                InlineKeyboardButton("$10 | 5x", callback_data="exec~R_100~5t~10~5"),
+                InlineKeyboardButton("$25 | 5x", callback_data="exec~R_100~5t~25~5")
+            ],
+            [
+                InlineKeyboardButton("$1 | ∞", callback_data="exec~R_100~5t~1~0"),
+                InlineKeyboardButton("$5 | ∞", callback_data="exec~R_100~5t~5~0")
             ],
             [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
         ]
@@ -1310,13 +1318,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Tunggu 30-60 detik untuk data cukup."
                 )
             else:
+                all_pairs = pair_scanner.get_all_pair_status()
+                pairs_analyzed = [p for p in all_pairs if p.get('has_enough_data', False)]
+                
                 rec_text = (
                     "🎯 **REKOMENDASI SAAT INI**\n\n"
                     "⚠️ **Tidak ada signal aktif**\n\n"
                     f"• {scanner_status['symbols_with_data']} pairs sudah dianalisis\n"
                     f"• {scanner_status['symbols_with_signal']} dengan signal\n\n"
-                    "Semua pair sedang SIDEWAYS. Tunggu atau pilih manual."
                 )
+                
+                if pairs_analyzed:
+                    rec_text += "📊 **Pairs yang dianalisis:**\n"
+                    for p in pairs_analyzed[:8]:
+                        trend_icon = "📈" if p.get('trend_direction') == "UP" else ("📉" if p.get('trend_direction') == "DOWN" else "➡️")
+                        rec_text += f"• {p['name']} ({p['symbol']}): {trend_icon} {p.get('trend_direction', 'SIDEWAYS')}\n"
+                    rec_text += "\n"
+                
+                rec_text += "Semua pair sedang SIDEWAYS. Tunggu atau pilih manual."
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh", callback_data="menu_recommendations")],
                 [InlineKeyboardButton("📊 Pilih Manual", callback_data="select_symbol")],
@@ -1405,11 +1424,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("$0.50 | 5x", callback_data=f"exec~{symbol}~5t~050~5"),
-                InlineKeyboardButton("$0.50 | 10x", callback_data=f"exec~{symbol}~5t~050~10")
+                InlineKeyboardButton("$1 | 5x", callback_data=f"exec~{symbol}~5t~1~5")
             ],
             [
-                InlineKeyboardButton("$1 | 5x", callback_data=f"exec~{symbol}~5t~1~5"),
-                InlineKeyboardButton("$1 | ∞", callback_data=f"exec~{symbol}~5t~1~0")
+                InlineKeyboardButton("$2 | 5x", callback_data=f"exec~{symbol}~5t~2~5"),
+                InlineKeyboardButton("$5 | 5x", callback_data=f"exec~{symbol}~5t~5~5")
+            ],
+            [
+                InlineKeyboardButton("$10 | 5x", callback_data=f"exec~{symbol}~5t~10~5"),
+                InlineKeyboardButton("$25 | 5x", callback_data=f"exec~{symbol}~5t~25~5")
+            ],
+            [
+                InlineKeyboardButton("$1 | ∞", callback_data=f"exec~{symbol}~5t~1~0"),
+                InlineKeyboardButton("$5 | ∞", callback_data=f"exec~{symbol}~5t~5~0")
             ],
             [InlineKeyboardButton("« Kembali", callback_data="menu_recommendations")]
         ]

@@ -1757,8 +1757,10 @@ class TradingManager:
                 self._complete_session()
                 return
         
-        # RISK CHECK 3: Cek daily loss limit
-        if self.daily_loss >= self.MAX_DAILY_LOSS:
+        # RISK CHECK 3: Cek daily loss limit (HANYA untuk akun REAL, skip untuk DEMO)
+        # Gunakan current_account_type karena lebih reliable daripada account_info.is_virtual
+        is_demo_account = self.ws and self.ws.current_account_type == AccountType.DEMO
+        if self.daily_loss >= self.MAX_DAILY_LOSS and not is_demo_account:
             logger.warning(f"⚠️ Daily loss limit reached! Daily loss: ${self.daily_loss:.2f} >= ${self.MAX_DAILY_LOSS:.2f}")
             if self.on_error:
                 self.on_error(f"Trading dihentikan! Daily loss limit ${self.MAX_DAILY_LOSS:.2f} tercapai. Loss hari ini: ${self.daily_loss:.2f}")
@@ -1766,6 +1768,8 @@ class TradingManager:
             self.signal_processing_start_time = 0.0
             self._complete_session()
             return
+        elif self.daily_loss >= self.MAX_DAILY_LOSS and is_demo_account:
+            logger.info(f"📊 Daily loss ${self.daily_loss:.2f} (Demo account - limit tidak aktif)")
         
         # RISK CHECK 4: Cek apakah stake berikutnya (Martingale) melebihi balance
         multiplier = self._get_martingale_multiplier()
