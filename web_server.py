@@ -32,15 +32,17 @@ Usage:
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -82,12 +84,83 @@ def get_or_create_dashboard_secret() -> str:
 
 DASHBOARD_SECRET = get_or_create_dashboard_secret()
 
+user_tokens: Dict[str, str] = {}
+
+
+def validate_telegram_init_data(init_data: str) -> Optional[dict]:
+    """
+    Validate Telegram WebApp initData using HMAC-SHA256.
+    
+    Returns user info dict if valid, None if invalid.
+    """
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        logger.warning("TELEGRAM_BOT_TOKEN not set, cannot validate Telegram auth")
+        return None
+    
+    try:
+        parsed = urllib.parse.parse_qs(init_data)
+        
+        if "hash" not in parsed:
+            return None
+        
+        received_hash = parsed["hash"][0]
+        
+        data_pairs = []
+        for key, values in parsed.items():
+            if key != "hash":
+                data_pairs.append(f"{key}={values[0]}")
+        
+        data_pairs.sort()
+        data_check_string = "\n".join(data_pairs)
+        
+        secret_key = hmac.new(
+            b"WebAppData",
+            bot_token.encode(),
+            hashlib.sha256
+        ).digest()
+        
+        calculated_hash = hmac.new(
+            secret_key,
+            data_check_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        if not hmac.compare_digest(calculated_hash, received_hash):
+            logger.warning("Telegram initData hash validation failed")
+            return None
+        
+        if "user" in parsed:
+            user_data = json.loads(parsed["user"][0])
+            return user_data
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error validating Telegram initData: {e}")
+        return None
+
+
+def get_or_create_user_token(telegram_id: str) -> str:
+    """Get existing token for user or create a new one."""
+    if telegram_id in user_tokens:
+        return user_tokens[telegram_id]
+    
+    token = secrets.token_urlsafe(32)
+    user_tokens[telegram_id] = token
+    logger.info(f"Generated new token for Telegram user {telegram_id}")
+    return token
+
 
 def verify_token(token: Optional[str]) -> bool:
-    """Verify if the provided token matches the dashboard secret."""
+    """Verify if the provided token matches the dashboard secret or a user token."""
     if not token:
         return False
-    return secrets.compare_digest(token, DASHBOARD_SECRET)
+    if secrets.compare_digest(token, DASHBOARD_SECRET):
+        return True
+    if token in user_tokens.values():
+        return True
+    return False
 
 
 async def get_auth_token(authorization: Optional[str] = Header(None)) -> str:
@@ -295,6 +368,57 @@ def create_app() -> FastAPI:
         </body>
         </html>
         """)
+    
+    @app.post("/api/auth/telegram")
+    async def telegram_auth(request: Request):
+        """
+        Authenticate user via Telegram WebApp initData.
+        
+        Receives initData from Telegram WebApp, validates it using HMAC-SHA256,
+        and returns a user-specific token for dashboard access.
+        
+        Request body:
+            {"initData": "..."}
+            
+        Returns:
+            JSON with success status, token, and user info
+        """
+        try:
+            body = await request.json()
+            init_data = body.get("initData")
+            
+            if not init_data:
+                raise HTTPException(status_code=400, detail="Missing initData")
+            
+            user_info = validate_telegram_init_data(init_data)
+            
+            if not user_info:
+                raise HTTPException(status_code=401, detail="Invalid Telegram authentication")
+            
+            telegram_id = str(user_info.get("id"))
+            if not telegram_id:
+                raise HTTPException(status_code=400, detail="Invalid user data")
+            
+            token = get_or_create_user_token(telegram_id)
+            
+            logger.info(f"Telegram user authenticated: {user_info.get('first_name')} (ID: {telegram_id})")
+            
+            return JSONResponse(content={
+                "success": True,
+                "token": token,
+                "user": {
+                    "id": telegram_id,
+                    "first_name": user_info.get("first_name", ""),
+                    "last_name": user_info.get("last_name", ""),
+                    "username": user_info.get("username", "")
+                }
+            })
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Telegram auth error: {e}")
+            raise HTTPException(status_code=500, detail="Authentication failed")
     
     @app.get("/api/summary")
     async def get_summary(token: str = Depends(get_auth_token)):

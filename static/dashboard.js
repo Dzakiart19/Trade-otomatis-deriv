@@ -19,6 +19,11 @@ class TradingDashboard {
     }
     
     init() {
+        if (window.Telegram?.WebApp?.initData) {
+            this.telegramAuth();
+            return;
+        }
+        
         this.authToken = sessionStorage.getItem('dashboard_token');
         
         if (!this.authToken) {
@@ -31,6 +36,56 @@ class TradingDashboard {
         this.fetchInitialData();
         
         setInterval(() => this.sendPing(), 30000);
+    }
+    
+    async telegramAuth() {
+        const tg = window.Telegram.WebApp;
+        const initData = tg.initData;
+        
+        try {
+            const response = await fetch('/api/auth/telegram', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData })
+            });
+            
+            if (!response.ok) {
+                console.error('Telegram auth failed:', response.status);
+                this.showAuthPrompt();
+                return;
+            }
+            
+            const data = await response.json();
+            
+            if (data.success && data.token) {
+                this.authToken = data.token;
+                this.telegramUser = data.user;
+                sessionStorage.setItem('dashboard_token', data.token);
+                
+                tg.ready();
+                tg.expand();
+                
+                this.initCharts();
+                this.connectWebSocket();
+                this.fetchInitialData();
+                this.showTelegramWelcome(data.user);
+                
+                setInterval(() => this.sendPing(), 30000);
+            } else {
+                console.error('Telegram auth response invalid:', data);
+                this.showAuthPrompt();
+            }
+        } catch (e) {
+            console.error('Telegram auth error:', e);
+            this.showAuthPrompt();
+        }
+    }
+    
+    showTelegramWelcome(user) {
+        const header = document.querySelector('.header h1');
+        if (header && user?.first_name) {
+            header.textContent = `Welcome, ${user.first_name}!`;
+        }
     }
     
     showAuthPrompt() {
