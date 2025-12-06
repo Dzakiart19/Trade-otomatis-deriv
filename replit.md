@@ -16,6 +16,15 @@ Do not make changes to the file `Y`.
 - **Trade Journal**: CSV logging for every trade.
 - **Error Logging**: Detailed error logs for debugging.
 - **Telegram Commands**: Interactive command-based control for starting/stopping trades, managing accounts, and checking status.
+- **Web Dashboard UI Redesign (v3.2)**:
+    - **Minimalist & Clean Design**: Modern, clutter-free interface following "Less but better" principle
+    - **Color Palette**: Neutral colors (#FFFFFF, #F5F5F5, #EAEAEA, #1A1A1A) with blue accent (#3B82F6)
+    - **Typography**: Inter font family for modern, professional appearance
+    - **Layout**: 8px grid system for consistent spacing (var(--spacing-xs) through var(--spacing-xl))
+    - **Components**: Rounded corners (var(--radius-sm) through var(--radius-lg)), soft shadows (var(--shadow-sm) through var(--shadow-lg))
+    - **Responsive Design**: Mobile-first approach with breakpoints at 768px and 480px
+    - **Reusable Components**: Cards, buttons, badges, tables, forms, status indicators
+    - **CSS Variables**: Centralized design tokens for easy theming and consistency
 
 ### Technical Implementations
 - **Multi-Indicator Strategy**:
