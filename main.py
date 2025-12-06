@@ -1414,6 +1414,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     keyboard.insert(0, signal_buttons[:2])
                     if len(signal_buttons) > 2:
                         keyboard.insert(1, signal_buttons[2:4])
+            elif pairs_analyzed:
+                analyzed_buttons = []
+                for p in pairs_analyzed[:6]:
+                    trend_icon = "📈" if p.get('trend_direction') == "UP" else ("📉" if p.get('trend_direction') == "DOWN" else "➡️")
+                    btn_text = f"{trend_icon} {p.get('symbol', 'UNKNOWN')}"
+                    analyzed_buttons.append(InlineKeyboardButton(btn_text, callback_data=f"rec_trade~{p.get('symbol', 'R_100')}"))
+                for i in range(0, len(analyzed_buttons), 2):
+                    row = analyzed_buttons[i:i+2]
+                    keyboard.insert(i // 2, row)
         else:
             rec_text = (
                 "🎯 **REKOMENDASI SAAT INI**\n\n"
