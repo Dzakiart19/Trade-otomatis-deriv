@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import secrets
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -53,6 +54,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DASHBOARD_SECRET_FILE = ".dashboard_secret"
+TELEGRAM_AUTH_MAX_AGE = 300  # 5 minutes max age for Telegram initData
 
 
 def get_or_create_dashboard_secret() -> str:
@@ -128,6 +130,21 @@ def validate_telegram_init_data(init_data: str) -> Optional[dict]:
         
         if not hmac.compare_digest(calculated_hash, received_hash):
             logger.warning("Telegram initData hash validation failed")
+            return None
+        
+        auth_date_str = parsed.get("auth_date")
+        if not auth_date_str:
+            logger.warning("Missing auth_date in initData")
+            return None
+        
+        try:
+            auth_date = int(auth_date_str[0])
+            current_time = int(time.time())
+            if current_time - auth_date > TELEGRAM_AUTH_MAX_AGE:
+                logger.warning(f"Telegram initData expired: auth_date={auth_date}, current={current_time}")
+                return None
+        except (ValueError, TypeError):
+            logger.warning("Invalid auth_date format")
             return None
         
         if "user" in parsed:
