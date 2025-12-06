@@ -282,41 +282,6 @@ class TradingDashboard {
     }
     
     initCharts() {
-        const chartOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: { enabled: true }
-            },
-            scales: {
-                x: {
-                    display: false,
-                    grid: { display: false }
-                },
-                y: {
-                    display: true,
-                    grid: {
-                        color: 'rgba(255, 255, 255, 0.05)',
-                        drawBorder: false
-                    },
-                    ticks: {
-                        color: '#a0a0a0',
-                        font: { size: 10 },
-                        maxTicksLimit: 4
-                    }
-                }
-            },
-            elements: {
-                point: { radius: 0 },
-                line: {
-                    tension: 0.1,
-                    borderWidth: 2
-                }
-            }
-        };
-        
         this.symbols.forEach(symbol => {
             const canvas = document.getElementById(`chart-${symbol}`);
             if (!canvas) return;
@@ -325,23 +290,159 @@ class TradingDashboard {
             
             this.priceData[symbol] = {
                 labels: [],
-                prices: []
+                prices: [],
+                entryIndex: null,
+                entryPrice: null
+            };
+            
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { enabled: true },
+                    annotation: {
+                        annotations: {}
+                    }
+                },
+                scales: {
+                    x: {
+                        display: false,
+                        grid: { display: false }
+                    },
+                    y: {
+                        display: true,
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.05)',
+                            drawBorder: false
+                        },
+                        ticks: {
+                            color: '#a0a0a0',
+                            font: { size: 10 },
+                            maxTicksLimit: 4
+                        }
+                    }
+                },
+                elements: {
+                    point: { radius: 0 },
+                    line: {
+                        tension: 0.1,
+                        borderWidth: 2
+                    }
+                }
             };
             
             this.charts[symbol] = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: [],
-                    datasets: [{
-                        data: [],
-                        borderColor: '#00d4ff',
-                        backgroundColor: 'rgba(0, 212, 255, 0.1)',
-                        fill: true
-                    }]
+                    datasets: [
+                        {
+                            data: [],
+                            borderColor: '#00d4ff',
+                            backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                            fill: true,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'Entry Point',
+                            data: [],
+                            borderColor: 'transparent',
+                            backgroundColor: 'transparent',
+                            pointRadius: [],
+                            pointBackgroundColor: [],
+                            pointBorderColor: [],
+                            pointBorderWidth: 2,
+                            showLine: false
+                        }
+                    ]
                 },
                 options: chartOptions
             });
         });
+    }
+    
+    updateChartEntryMarkers(symbol) {
+        const chart = this.charts[symbol];
+        const priceData = this.priceData[symbol];
+        if (!chart || !priceData) return;
+        
+        const position = this.getPositionForSymbol(symbol);
+        
+        if (position) {
+            const entryPrice = position.entry_price;
+            const direction = position.direction.toLowerCase();
+            const isCall = direction === 'call';
+            const color = isCall ? '#00ff88' : '#ff4757';
+            
+            chart.options.plugins.annotation.annotations = {
+                entryLine: {
+                    type: 'line',
+                    yMin: entryPrice,
+                    yMax: entryPrice,
+                    borderColor: color,
+                    borderWidth: 2,
+                    borderDash: [6, 4],
+                    label: {
+                        display: true,
+                        content: `Entry: ${entryPrice.toFixed(2)} (${position.direction})`,
+                        position: 'start',
+                        backgroundColor: color,
+                        color: '#000',
+                        font: {
+                            size: 10,
+                            weight: 'bold'
+                        },
+                        padding: { top: 2, bottom: 2, left: 4, right: 4 }
+                    }
+                }
+            };
+            
+            const entryDataset = chart.data.datasets[1];
+            const dataLength = priceData.prices.length;
+            
+            entryDataset.data = new Array(dataLength).fill(null);
+            entryDataset.pointRadius = new Array(dataLength).fill(0);
+            entryDataset.pointBackgroundColor = new Array(dataLength).fill('transparent');
+            entryDataset.pointBorderColor = new Array(dataLength).fill('transparent');
+            
+            if (priceData.entryIndex !== null && priceData.entryIndex < dataLength) {
+                const idx = priceData.entryIndex;
+                entryDataset.data[idx] = entryPrice;
+                entryDataset.pointRadius[idx] = 8;
+                entryDataset.pointBackgroundColor[idx] = color;
+                entryDataset.pointBorderColor[idx] = '#fff';
+            }
+        } else {
+            chart.options.plugins.annotation.annotations = {};
+            
+            const entryDataset = chart.data.datasets[1];
+            entryDataset.data = [];
+            entryDataset.pointRadius = [];
+            entryDataset.pointBackgroundColor = [];
+            entryDataset.pointBorderColor = [];
+            
+            priceData.entryIndex = null;
+            priceData.entryPrice = null;
+        }
+        
+        chart.update('none');
+    }
+    
+    getPositionForSymbol(symbol) {
+        const positions = Object.values(this.positions);
+        return positions.find(pos => pos.symbol === symbol);
+    }
+    
+    markEntryPoint(symbol, entryPrice) {
+        const priceData = this.priceData[symbol];
+        if (!priceData) return;
+        
+        priceData.entryIndex = priceData.prices.length > 0 ? priceData.prices.length - 1 : 0;
+        priceData.entryPrice = entryPrice;
+        
+        this.updateChartEntryMarkers(symbol);
     }
     
     connectWebSocket() {
