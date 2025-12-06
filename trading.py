@@ -927,6 +927,12 @@ class TradingManager:
         self.state = TradingState.STOPPED
         self.is_processing_signal = False
         
+        # CRITICAL: Reset contract tracking to prevent "waiting for contract" bug
+        self.current_contract_id = None
+        self.current_trade_type = None
+        self.signal_processing_start_time = 0.0
+        self.buy_request_time = 0.0
+        
         logger.info(f"🏁 Session complete! Total profit: ${self.stats.total_profit:.2f}")
         
         # CRITICAL: Broadcast PositionsResetEvent lalu clear dari EventBus
@@ -1972,6 +1978,10 @@ class TradingManager:
         # Reset processing flags untuk mencegah deadlock saat restart
         self.is_processing_signal = False
         self.signal_processing_start_time = 0.0
+        
+        # CRITICAL: Reset contract tracking to prevent "waiting for contract" bug
+        self.current_contract_id = None
+        self.current_trade_type = None
         
         # Save session summary
         self._save_session_summary()
