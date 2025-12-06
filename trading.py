@@ -1927,8 +1927,38 @@ class TradingManager:
         # Save session summary
         self._save_session_summary()
         
-        # Generate summary
-        return self._generate_session_summary()
+        # Generate summary BEFORE reset
+        summary = self._generate_session_summary()
+        
+        # Reset ALL state untuk session baru yang bersih
+        # Reset martingale state
+        self.martingale_level = 0
+        self.in_martingale_sequence = False
+        self.cumulative_loss = 0.0
+        self.current_stake = self.base_stake
+        self.consecutive_losses = 0
+        
+        # Reset session stats
+        self.stats = SessionStats()
+        self.trade_history = []
+        self.analytics = SessionAnalytics()
+        
+        # Reset progress tracking
+        self.tick_count = 0
+        self.last_progress_notification_time = 0.0
+        self.last_notified_milestone = -1
+        self.sent_milestones = set()
+        
+        # Reset daily loss tracking
+        self.daily_loss = 0.0
+        
+        # Reset buy tracking
+        self.buy_retry_count = 0
+        self.buy_request_time = 0.0
+        self.buy_failure_times = []
+        self.circuit_breaker_active = False
+        
+        return summary
         
     def _generate_session_summary(self) -> str:
         """Generate ringkasan session trading"""
