@@ -1225,6 +1225,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     stake = MIN_STAKE_GLOBAL
             target = int(target_str)
             
+            current_state = trading_manager.state
+            current_symbol = trading_manager.symbol
+            has_pending_contract = trading_manager.current_contract_id is not None
+            
+            if current_state == TradingState.RUNNING or current_state == TradingState.WAITING_RESULT:
+                if current_symbol != symbol:
+                    await query.edit_message_text(
+                        f"⚠️ **Trading Sedang Berjalan**\n\n"
+                        f"Saat ini masih ada trading aktif di **{current_symbol}**.\n\n"
+                        f"Hentikan dulu trading yang sedang berjalan dengan /stop sebelum memulai di symbol lain.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🛑 Stop Trading", callback_data="stop_trading")],
+                            [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+                        ])
+                    )
+                    return
+                else:
+                    await query.edit_message_text(
+                        f"⚠️ **Trading Sudah Berjalan**\n\n"
+                        f"Trading di **{symbol}** sudah aktif.\n"
+                        f"Tunggu sampai selesai atau hentikan dengan /stop.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
+                            [InlineKeyboardButton("🛑 Stop", callback_data="stop_trading")],
+                            [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+                        ])
+                    )
+                    return
+            
+            if has_pending_contract:
+                await query.edit_message_text(
+                    "⏳ **Menunggu Kontrak Selesai**\n\n"
+                    "Masih ada kontrak yang belum selesai.\n"
+                    "Tunggu beberapa detik sampai selesai.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Coba Lagi", callback_data=f"exec~{symbol}~{duration_str}~{stake_str}~{target_str}")],
+                        [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
+                    ])
+                )
+                return
+            
             duration, duration_unit = trading_manager.parse_duration(duration_str)
             config_msg = trading_manager.configure(
                 stake=stake,
@@ -1321,31 +1365,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Tunggu 30-60 detik untuk data cukup."
                 )
             else:
-                rec_text = (
-                    "🎯 **REKOMENDASI SAAT INI**\n\n"
-                    f"• {scanner_status['symbols_with_data']} pairs sudah dianalisis\n"
-                    f"• {scanner_status['symbols_with_signal']} dengan signal\n\n"
-                )
+                actual_signal_count = len(pairs_with_signal)
                 
-                if pairs_with_signal:
-                    rec_text += "📊 **Pairs dengan Signal:**\n"
+                rec_text = "🎯 **REKOMENDASI SAAT INI**\n\n"
+                
+                if pairs_with_signal and actual_signal_count > 0:
+                    rec_text += f"✅ **{actual_signal_count} Pair dengan Signal Aktif:**\n\n"
                     for p in pairs_with_signal[:8]:
                         signal_emoji = "🟢" if p.get('signal') == "CALL" else "🔴"
-                        safe_name = p['name'].replace('_', ' ')
-                        rec_text += f"• {signal_emoji} {safe_name}: {p.get('signal', 'WAIT')} (Score: {p.get('score', 0):.0f})\n"
-                    rec_text += "\n"
+                        pair_name = p.get('name', p.get('symbol', 'Unknown'))
+                        safe_name = pair_name.replace('_', ' ')
+                        score = p.get('score', 0)
+                        rsi = p.get('rsi', 50)
+                        adx = p.get('adx', 0)
+                        rec_text += (
+                            f"{signal_emoji} **{safe_name}**\n"
+                            f"   Signal: {p.get('signal', 'WAIT')} | Score: {score:.0f}\n"
+                            f"   RSI: {rsi:.1f} | ADX: {adx:.1f}\n\n"
+                        )
+                    rec_text += "Pilih pair di bawah untuk mulai trading!"
                 elif pairs_analyzed:
-                    rec_text += "📊 **Pairs yang dianalisis:**\n"
+                    rec_text += f"📊 **{len(pairs_analyzed)} pairs dianalisis:**\n\n"
                     for p in pairs_analyzed[:8]:
                         trend_icon = "📈" if p.get('trend_direction') == "UP" else ("📉" if p.get('trend_direction') == "DOWN" else "➡️")
-                        safe_name = p['name'].replace('_', ' ')
+                        pair_name = p.get('name', p.get('symbol', 'Unknown'))
+                        safe_name = pair_name.replace('_', ' ')
                         rec_text += f"• {safe_name}: {trend_icon} {p.get('trend_direction', 'SIDEWAYS')}\n"
-                    rec_text += "\n"
-                
-                if not pairs_with_signal:
-                    rec_text += "⚠️ Tidak ada signal aktif saat ini.\nSemua pair sedang SIDEWAYS. Tunggu atau pilih manual."
+                    rec_text += "\n⚠️ Tidak ada signal aktif saat ini.\nSemua pair sedang SIDEWAYS. Tunggu atau pilih manual."
                 else:
-                    rec_text += "✅ Ada signal aktif! Pilih pair di bawah atau pilih manual."
+                    rec_text += (
+                        f"• {scanner_status['symbols_with_data']} pairs sudah dianalisis\n\n"
+                        "⚠️ Tidak ada signal aktif saat ini.\nTunggu atau pilih manual."
+                    )
             
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh", callback_data="menu_recommendations")],
@@ -1469,6 +1520,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
+    elif data == "stop_trading":
+        if trading_manager:
+            stop_msg = trading_manager.stop()
+            await query.edit_message_text(
+                stop_msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 Mulai Trading Baru", callback_data="menu_autotrade")],
+                    [InlineKeyboardButton("« Menu Utama", callback_data="menu_main")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Trading manager belum siap.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Kembali", callback_data="menu_main")]
+                ])
+            )
+    
     elif data == "menu_status":
         if trading_manager:
             status_text = trading_manager.get_status()
