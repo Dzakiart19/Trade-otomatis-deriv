@@ -1578,9 +1578,9 @@ class TradingManager:
         symbol_config = get_symbol_config(self.symbol)
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
-        # Hard cap: stake tidak boleh lebih dari 25% balance
-        hard_cap = balance * 0.25
-        max_stake = min(max_stake, hard_cap)
+        # v2.4: REMOVED hard cap 25% - user bebas stake sesuai keinginan selama balance cukup
+        # Hanya pastikan stake >= minimum dan <= balance
+        max_stake = min(max_stake, balance)
         
         # Ensure minimum stake
         max_stake = max(min_stake, max_stake)
@@ -1609,19 +1609,12 @@ class TradingManager:
     def _perform_preflight_risk_check(self, current_balance: float) -> tuple[bool, str]:
         """
         Perform pre-flight risk validation sebelum execute trade.
-        Task 4: Enhanced Risk Management Validation.
         
-        v2.2 Update: Lebih fleksibel untuk martingale sequence
-        - Saat dalam martingale (level > 0), gunakan lookahead 3 level
-        - Hard cap 25% balance untuk stake maksimum
-        - Selalu cap stake ke nilai aman, jangan stop trading
-        - Hanya stop jika balance terlalu rendah untuk min stake
-        
-        v2.3 Update: Integrate volatility zone adjustment
-        - EXTREME_LOW zone: stake * 0.5
-        - LOW zone: stake * 0.7
-        - NORMAL zone: stake * 1.0
-        - HIGH/EXTREME_HIGH zone: stake * 0.85
+        v2.4 Update: User stake priority
+        - User bebas stake sesuai keinginan selama balance cukup
+        - TIDAK ada auto-cap persentase balance
+        - Hanya validasi: stake >= minimum DAN stake <= balance
+        - Martingale tetap berjalan sesuai multiplier
         
         Returns:
             Tuple (is_safe, message)
@@ -1635,7 +1628,7 @@ class TradingManager:
         symbol_config = get_symbol_config(self.symbol)
         min_stake = symbol_config.min_stake if symbol_config else MIN_STAKE_GLOBAL
         
-        # v2.3: Get volatility zone dari strategy untuk stake adjustment
+        # v2.4: Get volatility zone untuk logging saja, TIDAK untuk mengubah stake user
         volatility_zone = "NORMAL"
         try:
             vol_zone, vol_mult = self.strategy.get_volatility_zone()
@@ -1644,70 +1637,38 @@ class TradingManager:
         except Exception as e:
             logger.debug(f"Could not get volatility zone: {e}, using NORMAL")
         
-        # MARTINGALE RECOVERY PRIORITY: Jangan turunkan stake saat dalam martingale sequence
-        # Ini penting untuk recovery yang efektif setelah loss
+        # MARTINGALE RECOVERY: Saat dalam martingale sequence
         if self.in_martingale_sequence and self.martingale_level > 0:
-            # Saat dalam martingale, hanya check apakah balance cukup
+            # Hanya check apakah balance cukup untuk martingale stake
             if self.current_stake > current_balance:
                 msg = f"Balance ${current_balance:.2f} tidak cukup untuk martingale stake ${self.current_stake:.2f}"
                 logger.error(f"🛑 {msg}")
                 return False, msg
             
-            # Hard cap 50% balance untuk martingale (lebih toleran)
-            max_martingale_cap = current_balance * 0.50
-            if self.current_stake > max_martingale_cap:
-                old_stake = self.current_stake
-                self.current_stake = round(max_martingale_cap, 2)
-                logger.warning(f"⚠️ Martingale stake capped: ${old_stake:.2f} -> ${self.current_stake:.2f} (max 50% balance)")
-            
             logger.info(f"📊 MARTINGALE MODE: stake=${self.current_stake:.2f}, level={self.martingale_level}, balance=${current_balance:.2f}")
             return True, "Martingale recovery mode - stake preserved"
         
-        # Normal mode (tidak dalam martingale) - gunakan risk check standar
-        lookahead = self.MARTINGALE_LOOK_AHEAD_LEVELS
+        # NORMAL MODE: User stake tanpa auto-cap
+        # v2.4: Hanya validasi balance cukup, TIDAK ubah stake user
         
-        # Hitung max safe stake dengan lookahead dan volatility zone
-        safe_stake = self._calculate_max_safe_stake(current_balance, lookahead, volatility_zone)
+        # Check 1: Balance harus cukup untuk stake yang diminta
+        if self.current_stake > current_balance:
+            msg = f"Balance ${current_balance:.2f} tidak cukup untuk stake ${self.current_stake:.2f}"
+            logger.error(f"🛑 {msg}")
+            return False, msg
         
-        # Hard cap: stake tidak boleh lebih dari 25% balance untuk trade awal
-        max_stake_cap = current_balance * 0.25
-        if self.current_stake > max_stake_cap:
-            old_stake = self.current_stake
-            self.current_stake = round(max_stake_cap, 2)
-            logger.warning(f"⚠️ Stake auto-capped: ${old_stake:.2f} -> ${self.current_stake:.2f} (max 25% balance)")
-        
-        # Jika current stake melebihi safe stake, cap ke safe stake
-        if self.current_stake > safe_stake:
-            old_stake = self.current_stake
-            
-            # Pastikan safe stake tidak di bawah minimum
-            if safe_stake >= min_stake:
-                self.current_stake = safe_stake
-                logger.info(f"📊 Stake adjusted: ${old_stake:.2f} -> ${safe_stake:.2f} (vol zone: {volatility_zone})")
-            else:
-                # Balance terlalu rendah, tapi tetap coba dengan min stake
-                if current_balance >= min_stake:
-                    self.current_stake = min_stake
-                    logger.warning(f"⚠️ Stake adjusted to minimum: ${old_stake:.2f} -> ${min_stake:.2f}")
-                else:
-                    # Balance benar-benar tidak cukup
-                    msg = f"Balance ${current_balance:.2f} tidak cukup untuk minimum stake ${min_stake:.2f}"
-                    logger.error(f"🛑 {msg}")
-                    return False, msg
-        
-        # Pastikan stake tidak di bawah minimum
+        # Check 2: Pastikan stake tidak di bawah minimum
         if self.current_stake < min_stake:
             if current_balance >= min_stake:
                 self.current_stake = min_stake
+                logger.info(f"📊 Stake adjusted to minimum: ${min_stake:.2f}")
             else:
                 msg = f"Balance ${current_balance:.2f} tidak cukup untuk minimum stake ${min_stake:.2f}"
                 logger.error(f"🛑 {msg}")
                 return False, msg
         
-        # Log info exposure dengan volatility zone
-        total_exposure = self._calculate_total_exposure()
-        exposure_percent = (total_exposure / current_balance * 100) if current_balance > 0 else 100
-        logger.info(f"📊 Risk check: stake=${self.current_stake:.2f}, exposure={exposure_percent:.1f}%, level={self.martingale_level}, vol_zone={volatility_zone}")
+        # Log info (tanpa mengubah stake)
+        logger.info(f"📊 Risk check: stake=${self.current_stake:.2f}, balance=${current_balance:.2f}, vol_zone={volatility_zone}")
         
         return True, "Risk check passed"
     
@@ -1852,16 +1813,17 @@ class TradingManager:
         if not is_valid:
             return f"❌ Error: {error_msg}"
         
-        # Simpan symbol dulu untuk digunakan di _calculate_max_safe_stake
+        # Simpan symbol dulu
         self.symbol = symbol
             
-        # Log stake vs balance info (tanpa warning berlebihan ke user)
+        # v2.4: Log stake vs balance info (TANPA auto-adjust - user bebas stake)
         if self.ws and self.ws.is_ready():
             current_balance = self.ws.get_balance()
             if current_balance > 0:
-                max_safe_stake = self._calculate_max_safe_stake(current_balance)
-                if stake > max_safe_stake:
-                    logger.info(f"📊 Stake ${stake:.2f} akan auto-adjust ke ${max_safe_stake:.2f} saat trading")
+                if stake > current_balance:
+                    logger.warning(f"⚠️ Stake ${stake:.2f} melebihi balance ${current_balance:.2f} - akan gagal saat trading")
+                else:
+                    logger.info(f"📊 Stake ${stake:.2f} akan digunakan saat trading (balance: ${current_balance:.2f})")
             
         self.base_stake = stake
         self.current_stake = stake

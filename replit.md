@@ -73,6 +73,11 @@ Do not make changes to the file `Y`.
     - **Stake Preservation**: Stake martingale dipertahankan di configure(), start(), dan risk check
     - **Telegram Message Fallback**: Helper function untuk handle Markdown parsing error dengan fallback ke HTML/plain text
     - **Session Recovery Validation**: Validasi umur file (30 menit max), data integrity check, dan martingale level validation
+- **User Stake Priority (v2.10)**:
+    - **DIHAPUS Auto-Cap 25%**: User bebas stake berapa saja selama balance mencukupi
+    - **Validasi Minimal**: Hanya validasi: stake >= minimum DAN stake <= balance
+    - **Martingale Tanpa Cap**: Martingale berjalan penuh tanpa batasan persentase
+    - **User Control**: Stake yang dikonfigurasi user digunakan langsung tanpa modifikasi otomatis
 - **Stability & Performance Fixes (v3.0)**:
     - **WebSocket Memory Leak Fix**: `_cleanup_pending_requests()` method untuk cleanup expired pending requests setiap 60 detik via health check
     - **Thread Safety**: `is_connected` flag dijadikan thread-safe dengan `_is_connected_lock` dan property getter/setter
