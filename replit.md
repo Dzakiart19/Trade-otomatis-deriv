@@ -83,6 +83,16 @@ Do not make changes to the file `Y`.
     - **Session Complete Cleanup**: When trading stops or completes, broadcasts PositionsResetEvent then clears EventBus
     - **Dashboard Handler**: Frontend handles `positions_reset` event, clears all positions and entry markers
     - **No Analytics Corruption**: Unlike fake PositionCloseEvents, PositionsResetEvent doesn't create false trade history
+- **Tick Direction Predictor (v2.11)**:
+    - **Multi-Factor Prediction**: Prediksi arah tick 5-10 kedepan menggunakan analisis multi-faktor tertimbang
+    - **Momentum Analysis (25%)**: Deteksi akselerasi/deselerasi harga dari 15 tick terakhir
+    - **Tick Sequence Pattern (20%)**: Analisis pola consecutive up/down ticks
+    - **EMA Slope Strength (20%)**: Kekuatan crossover dan slope EMA
+    - **MACD Momentum (15%)**: Arah dan kekuatan histogram MACD
+    - **Stochastic Direction (10%)**: K/D crossover untuk konfirmasi
+    - **ADX Trend Confirmation (10%)**: Boost confidence saat trend kuat
+    - **Signal Blocking**: Sinyal BUY diblok jika prediksi bukan "UP" atau confidence < 60%, begitu juga SELL
+    - **Minimum Confidence**: Threshold 0.60 untuk memastikan prediksi cukup kuat sebelum trade
 - **Stability & Performance Fixes (v3.0)**:
     - **WebSocket Memory Leak Fix**: `_cleanup_pending_requests()` method untuk cleanup expired pending requests setiap 60 detik via health check
     - **Thread Safety**: `is_connected` flag dijadikan thread-safe dengan `_is_connected_lock` dan property getter/setter
