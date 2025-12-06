@@ -47,6 +47,7 @@ logs/
 
 # Session secret (generated at runtime)
 .session_secret
+.dashboard_secret
 
 # OS
 .DS_Store

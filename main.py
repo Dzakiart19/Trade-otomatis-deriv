@@ -52,6 +52,7 @@ from symbols import (
     get_symbol_list_text
 )
 from user_auth import auth_manager, UserAuthManager, ensure_authenticated, ALLOWED_CALLBACKS_WITHOUT_AUTH
+from event_bus import get_event_bus
 
 USD_TO_IDR = 15800
 CHAT_ID_FILE = "logs/active_chat_id.txt"
@@ -1950,13 +1951,40 @@ def main():
     
     import asyncio
     
+    async def start_web_server():
+        """Start FastAPI web server for dashboard"""
+        try:
+            import uvicorn
+            from web_server import app as web_app
+            
+            config = uvicorn.Config(
+                app=web_app,
+                host="0.0.0.0",
+                port=5000,
+                log_level="info",
+                access_log=True
+            )
+            server = uvicorn.Server(config)
+            logger.info("🌐 Starting web dashboard on http://0.0.0.0:5000")
+            await server.serve()
+        except Exception as e:
+            logger.error(f"❌ Web server error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
     async def start_bot():
         """Start bot dengan delete_webhook untuk menghindari conflict"""
+        event_bus = get_event_bus()
+        event_bus.set_event_loop(asyncio.get_running_loop())
+        logger.info("📡 EventBus loop configured for real-time updates")
+        
         await app.initialize()
         await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook deleted, starting polling...")
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        web_server_task = asyncio.create_task(start_web_server())
         
         try:
             while True:
@@ -1964,6 +1992,11 @@ def main():
         except asyncio.CancelledError:
             pass
         finally:
+            web_server_task.cancel()
+            try:
+                await web_server_task
+            except asyncio.CancelledError:
+                pass
             await app.updater.stop()
             await app.stop()
             await app.shutdown()

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deriv Trading Bot Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>Deriv Trading Bot</h1>
+            <div class="status-bar">
+                <div class="connection-status" id="connection-status">
+                    <span class="status-dot disconnected"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+                <div class="balance-display" id="balance-display">
+                    <span class="balance-label">Balance:</span>
+                    <span class="balance-value">--</span>
+                </div>
+                <div class="trading-status" id="trading-status">
+                    <span class="trading-indicator">Trading: --</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="dashboard-grid">
+            <section class="charts-section">
+                <h2>Live Price Charts</h2>
+                <div class="charts-grid" id="charts-grid">
+                    <div class="chart-card" data-symbol="R_100">
+                        <div class="chart-header">
+                            <span class="symbol-name">Volatility 100</span>
+                            <span class="current-price" id="price-R_100">--</span>
+                        </div>
+                        <canvas id="chart-R_100"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="R_75">
+                        <div class="chart-header">
+                            <span class="symbol-name">Volatility 75</span>
+                            <span class="current-price" id="price-R_75">--</span>
+                        </div>
+                        <canvas id="chart-R_75"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="R_50">
+                        <div class="chart-header">
+                            <span class="symbol-name">Volatility 50</span>
+                            <span class="current-price" id="price-R_50">--</span>
+                        </div>
+                        <canvas id="chart-R_50"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="R_25">
+                        <div class="chart-header">
+                            <span class="symbol-name">Volatility 25</span>
+                            <span class="current-price" id="price-R_25">--</span>
+                        </div>
+                        <canvas id="chart-R_25"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="R_10">
+                        <div class="chart-header">
+                            <span class="symbol-name">Volatility 10</span>
+                            <span class="current-price" id="price-R_10">--</span>
+                        </div>
+                        <canvas id="chart-R_10"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="1HZ100V">
+                        <div class="chart-header">
+                            <span class="symbol-name">1s Volatility 100</span>
+                            <span class="current-price" id="price-1HZ100V">--</span>
+                        </div>
+                        <canvas id="chart-1HZ100V"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="1HZ75V">
+                        <div class="chart-header">
+                            <span class="symbol-name">1s Volatility 75</span>
+                            <span class="current-price" id="price-1HZ75V">--</span>
+                        </div>
+                        <canvas id="chart-1HZ75V"></canvas>
+                    </div>
+                    <div class="chart-card" data-symbol="1HZ50V">
+                        <div class="chart-header">
+                            <span class="symbol-name">1s Volatility 50</span>
+                            <span class="current-price" id="price-1HZ50V">--</span>
+                        </div>
+                        <canvas id="chart-1HZ50V"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <section class="positions-section">
+                <h2>Active Positions</h2>
+                <div class="positions-container" id="positions-container">
+                    <div class="no-positions">No active positions</div>
+                </div>
+            </section>
+
+            <section class="history-section">
+                <h2>Trade History</h2>
+                <div class="history-stats" id="history-stats">
+                    <div class="stat-card">
+                        <span class="stat-label">Total Trades</span>
+                        <span class="stat-value" id="total-trades">0</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Win Rate</span>
+                        <span class="stat-value" id="win-rate">0%</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Total P/L</span>
+                        <span class="stat-value" id="total-pnl">$0.00</span>
+                    </div>
+                </div>
+                <div class="history-table-container">
+                    <table class="history-table" id="history-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Direction</th>
+                                <th>Stake</th>
+                                <th>Result</th>
+                                <th>Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
