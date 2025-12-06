@@ -840,12 +840,145 @@ class TradingStrategy:
             regime = "TRANSITIONAL"
             confidence = 0.3
         
+        # Enhanced regime detection with Bollinger Band Width
+        bb_width, bb_width_percentile = self.calculate_bollinger_width()
+        details['bb_width'] = round(bb_width, 6)
+        details['bb_width_percentile'] = round(bb_width_percentile, 2)
+        
+        # Bollinger squeeze detection (low width = ranging/consolidation)
+        if bb_width_percentile < 0.25 and adx < 18:
+            regime = "RANGING"
+            confidence = min(1.0, 0.6 + (0.25 - bb_width_percentile) * 0.8)
+            details['bb_squeeze'] = True
+        else:
+            details['bb_squeeze'] = False
+        
+        # Price action pattern confirmation
+        price_pattern, pattern_strength = self.detect_price_action_pattern()
+        details['price_pattern'] = price_pattern
+        details['pattern_strength'] = round(pattern_strength, 2)
+        
+        # Boost confidence if price pattern confirms regime
+        if regime == "TRENDING" and price_pattern in ["HIGHER_HIGHS", "LOWER_LOWS"]:
+            confidence = min(1.0, confidence + 0.10)
+        elif regime == "RANGING" and price_pattern == "CONSOLIDATING":
+            confidence = min(1.0, confidence + 0.10)
+        
         if self._previous_regime is not None and self._previous_regime != regime:
-            logger.info(f"📊 Regime change: {self._previous_regime} → {regime} (ADX={adx:.1f}, DI diff={di_diff:.1f}, conf={confidence:.0%})")
+            logger.info(f"📊 Regime change: {self._previous_regime} → {regime} (ADX={adx:.1f}, DI diff={di_diff:.1f}, BB_width={bb_width_percentile:.0%}, conf={confidence:.0%})")
         
         self._previous_regime = regime
         
         return regime, round(confidence, 3), details
+    
+    def calculate_bollinger_width(self, period: int = 20, std_mult: float = 2.0) -> Tuple[float, float]:
+        """
+        Calculate Bollinger Band Width and its percentile for regime detection.
+        
+        Low Bollinger Width = consolidation/ranging market (squeeze)
+        High Bollinger Width = trending/volatile market (expansion)
+        
+        Args:
+            period: Period for moving average
+            std_mult: Standard deviation multiplier
+            
+        Returns:
+            Tuple of (width, width_percentile)
+            - width: Absolute Bollinger Band width
+            - width_percentile: Percentile of current width vs history (0.0 to 1.0)
+        """
+        if len(self.tick_history) < period + 20:
+            return 0.0, 0.5
+        
+        # Calculate current Bollinger Band Width
+        recent = self.tick_history[-period:]
+        sma = safe_divide(sum(recent), len(recent), recent[-1])
+        variance = safe_divide(sum((p - sma) ** 2 for p in recent), len(recent), 0.0)
+        std_dev = variance ** 0.5
+        
+        upper_band = sma + (std_mult * std_dev)
+        lower_band = sma - (std_mult * std_dev)
+        current_width = upper_band - lower_band
+        
+        # Calculate historical width percentile
+        historical_widths = []
+        for i in range(period + 20, len(self.tick_history) + 1):
+            subset = self.tick_history[i-period:i]
+            sub_sma = safe_divide(sum(subset), len(subset), subset[-1])
+            sub_variance = safe_divide(sum((p - sub_sma) ** 2 for p in subset), len(subset), 0.0)
+            sub_std = sub_variance ** 0.5
+            hist_width = (sub_sma + std_mult * sub_std) - (sub_sma - std_mult * sub_std)
+            historical_widths.append(hist_width)
+        
+        if not historical_widths:
+            return current_width, 0.5
+        
+        # Calculate percentile
+        widths_below = sum(1 for w in historical_widths if w <= current_width)
+        percentile = safe_divide(widths_below, len(historical_widths), 0.5)
+        
+        return round(current_width, 6), round(percentile, 3)
+    
+    def detect_price_action_pattern(self, lookback: int = 20) -> Tuple[str, float]:
+        """
+        Detect price action patterns for regime confirmation.
+        
+        Patterns detected:
+        - HIGHER_HIGHS: Uptrend with successive higher highs
+        - LOWER_LOWS: Downtrend with successive lower lows
+        - CONSOLIDATING: Price moving sideways in range
+        - MIXED: No clear pattern
+        
+        Args:
+            lookback: Number of ticks to analyze
+            
+        Returns:
+            Tuple of (pattern, strength)
+            - pattern: Pattern name
+            - strength: 0.0 to 1.0 (how clear the pattern is)
+        """
+        if len(self.tick_history) < lookback:
+            return "MIXED", 0.0
+        
+        recent = self.tick_history[-lookback:]
+        
+        # Divide into segments to find local extrema
+        segment_size = lookback // 4
+        if segment_size < 2:
+            return "MIXED", 0.0
+        
+        segments = [recent[i:i+segment_size] for i in range(0, lookback, segment_size)]
+        
+        highs = [max(seg) for seg in segments if seg]
+        lows = [min(seg) for seg in segments if seg]
+        
+        if len(highs) < 3 or len(lows) < 3:
+            return "MIXED", 0.0
+        
+        # Check for Higher Highs
+        hh_count = sum(1 for i in range(1, len(highs)) if highs[i] > highs[i-1])
+        ll_count = sum(1 for i in range(1, len(lows)) if lows[i] < lows[i-1])
+        
+        # Check for consolidation (range-bound)
+        price_range = max(recent) - min(recent)
+        avg_price = safe_divide(sum(recent), len(recent), 1.0)
+        range_pct = safe_divide(price_range * 100, avg_price, 0.0)
+        
+        # Low range percentage = consolidation
+        if range_pct < 0.3:
+            return "CONSOLIDATING", min(1.0, 0.6 + (0.3 - range_pct) * 2)
+        
+        # Higher Highs pattern
+        if hh_count >= len(highs) - 2:
+            strength = min(1.0, hh_count / (len(highs) - 1))
+            return "HIGHER_HIGHS", strength
+        
+        # Lower Lows pattern
+        if ll_count >= len(lows) - 2:
+            strength = min(1.0, ll_count / (len(lows) - 1))
+            return "LOWER_LOWS", strength
+        
+        return "MIXED", 0.0
     
     def get_regime_weights(self, regime: str, regime_conf: float) -> Dict[str, float]:
         """
@@ -857,12 +990,14 @@ class TradingStrategy:
         IMPORTANT: Enforces MIN_FACTOR_WEIGHT to prevent any factor from being
         completely zeroed out, maintaining safety checks across all regimes.
         
+        Normalization ensures weights sum to 1.0 for consistent scoring.
+        
         Args:
             regime: "TRENDING", "RANGING", or "TRANSITIONAL"
             regime_conf: Confidence 0.0 to 1.0
             
         Returns:
-            Dict of factor weights (normalized to ~1.0)
+            Dict of factor weights (normalized to sum = 1.0)
         """
         baseline = self.PREDICTION_WEIGHTED_FACTORS
         
@@ -876,16 +1011,95 @@ class TradingStrategy:
         else:
             return baseline.copy()
         
+        # Calculate blend factor (0.0 at conf=0.5, 1.0 at conf=1.0)
         blend_factor = (regime_conf - 0.5) * 2
         
         blended = {}
+        total_weight = 0.0
+        
         for key in baseline:
             base_w = baseline.get(key, 0.0)
             target_w = target.get(key, 0.0)
             raw_weight = base_w + (target_w - base_w) * blend_factor
             blended[key] = max(self.MIN_FACTOR_WEIGHT, raw_weight)
+            total_weight += blended[key]
+        
+        # Normalize to sum = 1.0 for consistent scoring
+        if total_weight > 0:
+            for key in blended:
+                blended[key] = blended[key] / total_weight
+        
+        logger.debug(f"📊 Regime weights [{regime}@{regime_conf:.0%}]: momentum={blended.get('momentum', 0):.2f}, zscore={blended.get('zscore', 0):.2f}, ema={blended.get('ema_slope', 0):.2f}")
         
         return blended
+    
+    def get_regime_score_adjustment(self, signal_type: str, indicators: IndicatorValues) -> Tuple[float, str]:
+        """
+        Get regime-specific score adjustment for signal scoring.
+        
+        In TRENDING markets:
+        - Boost trend-following signals (when direction aligns with trend)
+        - Penalize counter-trend signals
+        
+        In RANGING markets:
+        - Boost mean-reversion signals (RSI extremes, Z-score extremes)
+        - Penalize trend-following signals
+        
+        Args:
+            signal_type: "BUY" or "SELL"
+            indicators: Current indicator values
+            
+        Returns:
+            Tuple of (multiplier, reason)
+            - multiplier: 0.8 to 1.3 adjustment factor
+            - reason: Explanation string
+        """
+        regime, regime_conf, regime_details = self.detect_market_regime()
+        
+        if regime == "TRANSITIONAL" or regime_conf < 0.5:
+            return 1.0, f"Regime {regime} ({regime_conf:.0%}) - no adjustment"
+        
+        trend_direction = regime_details.get('trend_direction', 'NEUTRAL')
+        
+        if regime == "TRENDING":
+            # In trending market, boost signals aligned with trend direction
+            if signal_type == "BUY" and trend_direction == "BULLISH":
+                multiplier = self.REGIME_TRENDING_MOMENTUM_BOOST
+                reason = f"📈 TRENDING+BULLISH: {signal_type} aligned with trend (+{(multiplier-1)*100:.0f}%)"
+            elif signal_type == "SELL" and trend_direction == "BEARISH":
+                multiplier = self.REGIME_TRENDING_MOMENTUM_BOOST
+                reason = f"📉 TRENDING+BEARISH: {signal_type} aligned with trend (+{(multiplier-1)*100:.0f}%)"
+            elif signal_type == "BUY" and trend_direction == "BEARISH":
+                multiplier = 0.85
+                reason = f"⚠️ TRENDING: {signal_type} counter-trend (-15%)"
+            elif signal_type == "SELL" and trend_direction == "BULLISH":
+                multiplier = 0.85
+                reason = f"⚠️ TRENDING: {signal_type} counter-trend (-15%)"
+            else:
+                multiplier = 1.0
+                reason = f"📊 TRENDING: neutral direction"
+                
+        elif regime == "RANGING":
+            # In ranging market, boost mean-reversion signals
+            rsi = indicators.rsi
+            zscore_dir, zscore_conf, zscore_details = self.calculate_zscore_mean_reversion()
+            
+            # Check if signal aligns with mean reversion
+            if signal_type == "BUY" and (rsi < 35 or zscore_dir == "UP"):
+                multiplier = self.REGIME_RANGING_ZSCORE_BOOST
+                reason = f"📊 RANGING: {signal_type} mean-reversion (RSI={rsi:.1f}, ZS={zscore_dir}) (+{(multiplier-1)*100:.0f}%)"
+            elif signal_type == "SELL" and (rsi > 65 or zscore_dir == "DOWN"):
+                multiplier = self.REGIME_RANGING_ZSCORE_BOOST
+                reason = f"📊 RANGING: {signal_type} mean-reversion (RSI={rsi:.1f}, ZS={zscore_dir}) (+{(multiplier-1)*100:.0f}%)"
+            else:
+                multiplier = 0.90
+                reason = f"⚠️ RANGING: {signal_type} not optimal for mean-reversion (-10%)"
+        else:
+            multiplier = 1.0
+            reason = "Unknown regime"
+        
+        logger.debug(reason)
+        return multiplier, reason
     
     def calculate_macd_incremental(self) -> Tuple[float, float, float]:
         """
@@ -3042,11 +3256,15 @@ class TradingStrategy:
             else:
                 confluence_multiplier = 0.85
             
+            # Regime-aware score adjustment v4.3
+            regime_multiplier, regime_reason = self.get_regime_score_adjustment("BUY", indicators)
+            buy_reasons.append(regime_reason)
+            
             if adx_valid or indicators.adx == 0:
                 self.update_signal_time("BUY")
                 
                 result.signal = Signal.BUY
-                final_confidence = min(buy_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier, 1.0)
+                final_confidence = min(buy_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier * regime_multiplier, 1.0)
                 result.confidence = final_confidence
                 result.reason = " | ".join(buy_reasons)
                 
@@ -3056,7 +3274,7 @@ class TradingStrategy:
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
+                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, confluence={confluence_score:.0f}/100, regime={regime_multiplier:.2f}, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
                 return result
                 
         if sell_score >= self.MIN_CONFIDENCE_THRESHOLD and sell_score > buy_score:
@@ -3112,11 +3330,15 @@ class TradingStrategy:
             else:
                 confluence_multiplier = 0.85
             
+            # Regime-aware score adjustment v4.3
+            regime_multiplier, regime_reason = self.get_regime_score_adjustment("SELL", indicators)
+            sell_reasons.append(regime_reason)
+            
             if adx_valid or indicators.adx == 0:
                 self.update_signal_time("SELL")
                 
                 result.signal = Signal.SELL
-                final_confidence = min(sell_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier, 1.0)
+                final_confidence = min(sell_score * vol_multiplier * adx_tp_multiplier * confluence_multiplier * regime_multiplier, 1.0)
                 result.confidence = final_confidence
                 result.reason = " | ".join(sell_reasons)
                 
@@ -3126,7 +3348,7 @@ class TradingStrategy:
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
+                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, confluence={confluence_score:.0f}/100, regime={regime_multiplier:.2f}, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
                 return result
                 
         result.signal = Signal.WAIT
