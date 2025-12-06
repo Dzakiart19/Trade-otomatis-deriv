@@ -254,7 +254,7 @@ class TradingManager:
     MAX_MARTINGALE_LEVEL = 3  # Reduced from 4 to limit exposure even more
     
     MAX_LOSS_PERCENT = 0.15  # Reduced from 0.20 for more conservative risk
-    MAX_CONSECUTIVE_LOSSES = 2  # CRITICAL: Reduced from 4 to 2 to limit consecutive losses
+    MAX_CONSECUTIVE_LOSSES = 5  # Allow 5 consecutive losses before stopping (user requested)
     TRADE_COOLDOWN_SECONDS = 4.0  # Increased from 3.0 for better entry timing
     MAX_BUY_RETRY = 5
     MAX_DAILY_LOSS = 50.0

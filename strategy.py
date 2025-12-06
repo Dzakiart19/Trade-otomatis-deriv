@@ -25,6 +25,17 @@ Enhancement v2.2:
 - Dynamic volatility-based position sizing
 - RSI entry range validation (25-30 for BUY, 70-75 for SELL)
 - Enhanced confidence scoring dengan ADX/volatility factors
+
+Enhancement v2.5 - Tick Direction Predictor:
+- Multi-factor tick direction prediction for next 5-10 ticks
+- Momentum analysis from price acceleration/deceleration
+- Tick sequence pattern detection (consecutive up/down ticks)
+- EMA slope strength analysis
+- MACD momentum and histogram direction
+- Stochastic K/D crossover direction
+- ADX trend confirmation for higher prediction confidence
+- Signal blocking when prediction conflicts with signal direction
+- Minimum prediction confidence threshold (0.60)
 =============================================================
 """
 
@@ -237,6 +248,10 @@ class TradingStrategy:
     ADX_DIRECTIONAL_CONFLICT_THRESHOLD = 15  # HARD BLOCK if DI diff > 15 (gives some tolerance)
     BLOCK_EXTREME_VOLATILITY = False  # DISABLED - synthetic indices have naturally high volatility
     BLOCK_EMA_SLOPE_CONFLICT = False  # Soft warning only - don't hard block EMA slope
+    
+    MIN_PREDICTION_CONFIDENCE = 0.60  # Minimum confidence for tick direction prediction
+    PREDICTION_MOMENTUM_LOOKBACK = 15  # Ticks to analyze for momentum
+    PREDICTION_SEQUENCE_LOOKBACK = 10  # Ticks to analyze for sequence patterns
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -1420,6 +1435,252 @@ class TradingStrategy:
         )
         
         return total_score, confidence_level, details
+    
+    def predict_tick_direction(self, look_ahead: int = 5) -> Tuple[str, float]:
+        """Tick Direction Predictor for next 5-10 ticks.
+        
+        Analyzes multiple factors to predict short-term price direction:
+        1. Momentum Analysis: Price acceleration/deceleration
+        2. Tick Sequence Pattern: Consecutive up/down ticks
+        3. EMA Slope Strength: Trend direction from EMA
+        4. MACD Momentum: Histogram direction and strength
+        5. Stochastic Direction: K/D crossover direction
+        6. ADX Trend Confirmation: Strong trend = higher confidence
+        
+        Args:
+            look_ahead: Number of ticks to predict ahead (default 5)
+            
+        Returns:
+            Tuple of (direction, confidence)
+            - direction: "UP" or "DOWN"
+            - confidence: 0.0 to 1.0
+        """
+        if len(self.tick_history) < self.MIN_TICK_HISTORY:
+            return "UP", 0.0
+        
+        indicators = self.last_indicators
+        if indicators.rsi == 50.0 and indicators.ema_fast == 0.0:
+            indicators = self.calculate_all_indicators()
+        
+        up_score = 0.0
+        down_score = 0.0
+        total_weight = 0.0
+        prediction_factors = []
+        
+        momentum_weight = 0.25
+        total_weight += momentum_weight
+        
+        lookback = min(self.PREDICTION_MOMENTUM_LOOKBACK, len(self.tick_history) - 1)
+        if lookback >= 3:
+            recent_ticks = self.tick_history[-lookback:]
+            
+            price_changes = [recent_ticks[i] - recent_ticks[i-1] for i in range(1, len(recent_ticks))]
+            
+            if len(price_changes) >= 2:
+                first_half = price_changes[:len(price_changes)//2]
+                second_half = price_changes[len(price_changes)//2:]
+                
+                first_avg = safe_divide(sum(first_half), len(first_half), 0.0)
+                second_avg = safe_divide(sum(second_half), len(second_half), 0.0)
+                
+                acceleration = second_avg - first_avg
+                
+                avg_change = safe_divide(sum(abs(c) for c in price_changes), len(price_changes), 0.001)
+                normalized_accel = safe_divide(acceleration, avg_change, 0.0)
+                
+                if normalized_accel > 0.3:
+                    up_score += momentum_weight * min(1.0, normalized_accel)
+                    prediction_factors.append(f"Momentum UP ({normalized_accel:.2f})")
+                elif normalized_accel < -0.3:
+                    down_score += momentum_weight * min(1.0, abs(normalized_accel))
+                    prediction_factors.append(f"Momentum DOWN ({normalized_accel:.2f})")
+                else:
+                    net_change = sum(price_changes)
+                    if net_change > 0:
+                        up_score += momentum_weight * 0.3
+                        prediction_factors.append(f"Net momentum UP")
+                    elif net_change < 0:
+                        down_score += momentum_weight * 0.3
+                        prediction_factors.append(f"Net momentum DOWN")
+        
+        sequence_weight = 0.20
+        total_weight += sequence_weight
+        
+        seq_lookback = min(self.PREDICTION_SEQUENCE_LOOKBACK, len(self.tick_history) - 1)
+        if seq_lookback >= 3:
+            recent = self.tick_history[-seq_lookback:]
+            consecutive_up = 0
+            consecutive_down = 0
+            
+            for i in range(len(recent) - 1, 0, -1):
+                if recent[i] > recent[i-1]:
+                    if consecutive_down == 0:
+                        consecutive_up += 1
+                    else:
+                        break
+                elif recent[i] < recent[i-1]:
+                    if consecutive_up == 0:
+                        consecutive_down += 1
+                    else:
+                        break
+                else:
+                    break
+            
+            up_ticks = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
+            down_ticks = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
+            
+            if consecutive_up >= 3:
+                up_score += sequence_weight * min(1.0, consecutive_up / 5)
+                prediction_factors.append(f"Consec UP ({consecutive_up})")
+            elif consecutive_down >= 3:
+                down_score += sequence_weight * min(1.0, consecutive_down / 5)
+                prediction_factors.append(f"Consec DOWN ({consecutive_down})")
+            elif up_ticks > down_ticks + 2:
+                up_score += sequence_weight * 0.5
+                prediction_factors.append(f"Pattern UP ({up_ticks}/{down_ticks})")
+            elif down_ticks > up_ticks + 2:
+                down_score += sequence_weight * 0.5
+                prediction_factors.append(f"Pattern DOWN ({down_ticks}/{up_ticks})")
+        
+        ema_weight = 0.20
+        total_weight += ema_weight
+        
+        if indicators.ema_fast > 0 and indicators.ema_slow > 0:
+            ema_diff_pct = safe_divide((indicators.ema_fast - indicators.ema_slow) * 100, indicators.ema_slow, 0.0)
+            
+            slope_valid, _, slope_data = self.check_ema_slope("BUY")
+            slope_direction = slope_data.get('direction', 'flat')
+            slope_strength = slope_data.get('strength', 'neutral')
+            
+            if indicators.ema_fast > indicators.ema_slow:
+                strength_mult = 1.0 if slope_strength == 'strong' else 0.7 if slope_strength == 'moderate' else 0.4
+                if slope_direction == 'bullish':
+                    up_score += ema_weight * strength_mult
+                    prediction_factors.append(f"EMA bullish ({ema_diff_pct:.3f}%)")
+                elif slope_direction == 'flat':
+                    up_score += ema_weight * 0.3
+                    prediction_factors.append(f"EMA flat-bullish")
+            elif indicators.ema_fast < indicators.ema_slow:
+                strength_mult = 1.0 if slope_strength == 'strong' else 0.7 if slope_strength == 'moderate' else 0.4
+                if slope_direction == 'bearish':
+                    down_score += ema_weight * strength_mult
+                    prediction_factors.append(f"EMA bearish ({ema_diff_pct:.3f}%)")
+                elif slope_direction == 'flat':
+                    down_score += ema_weight * 0.3
+                    prediction_factors.append(f"EMA flat-bearish")
+        
+        macd_weight = 0.15
+        total_weight += macd_weight
+        
+        if indicators.macd_histogram != 0:
+            macd_hist = indicators.macd_histogram
+            macd_line = indicators.macd_line
+            macd_signal = indicators.macd_signal
+            
+            histogram_positive = macd_hist > 0
+            histogram_increasing = len(self._macd_values_cache) >= 2 and (
+                self._macd_values_cache[-1] > self._macd_values_cache[-2] if len(self._macd_values_cache) >= 2 else False
+            )
+            
+            if histogram_positive:
+                strength = min(1.0, abs(macd_hist) * 1000)
+                up_score += macd_weight * (0.7 + 0.3 * strength)
+                prediction_factors.append(f"MACD+ ({macd_hist:.6f})")
+            else:
+                strength = min(1.0, abs(macd_hist) * 1000)
+                down_score += macd_weight * (0.7 + 0.3 * strength)
+                prediction_factors.append(f"MACD- ({macd_hist:.6f})")
+            
+            if macd_line > macd_signal and histogram_positive:
+                up_score += macd_weight * 0.2
+            elif macd_line < macd_signal and not histogram_positive:
+                down_score += macd_weight * 0.2
+        
+        stoch_weight = 0.10
+        total_weight += stoch_weight
+        
+        stoch_k = indicators.stoch_k
+        stoch_d = indicators.stoch_d
+        
+        if stoch_k > stoch_d:
+            if stoch_k < 30:
+                up_score += stoch_weight * 1.0
+                prediction_factors.append(f"Stoch bullish cross OS ({stoch_k:.1f})")
+            elif stoch_k < 50:
+                up_score += stoch_weight * 0.7
+                prediction_factors.append(f"Stoch bullish ({stoch_k:.1f})")
+            else:
+                up_score += stoch_weight * 0.4
+        elif stoch_k < stoch_d:
+            if stoch_k > 70:
+                down_score += stoch_weight * 1.0
+                prediction_factors.append(f"Stoch bearish cross OB ({stoch_k:.1f})")
+            elif stoch_k > 50:
+                down_score += stoch_weight * 0.7
+                prediction_factors.append(f"Stoch bearish ({stoch_k:.1f})")
+            else:
+                down_score += stoch_weight * 0.4
+        
+        adx_weight = 0.10
+        total_weight += adx_weight
+        
+        adx = indicators.adx
+        plus_di = indicators.plus_di
+        minus_di = indicators.minus_di
+        
+        if adx >= self.ADX_STRONG_TREND:
+            trend_strength = min(1.0, adx / 40)
+            
+            if plus_di > minus_di:
+                up_score += adx_weight * trend_strength
+                prediction_factors.append(f"ADX bullish ({adx:.1f}, +DI>{'-'}DI)")
+            elif minus_di > plus_di:
+                down_score += adx_weight * trend_strength
+                prediction_factors.append(f"ADX bearish ({adx:.1f}, -DI>{'+'}DI)")
+        elif adx >= self.ADX_WEAK_TREND:
+            if plus_di > minus_di + 5:
+                up_score += adx_weight * 0.5
+                prediction_factors.append(f"ADX weak bullish ({adx:.1f})")
+            elif minus_di > plus_di + 5:
+                down_score += adx_weight * 0.5
+                prediction_factors.append(f"ADX weak bearish ({adx:.1f})")
+        
+        if total_weight > 0:
+            up_normalized = safe_divide(up_score, total_weight, 0.0)
+            down_normalized = safe_divide(down_score, total_weight, 0.0)
+        else:
+            up_normalized = 0.0
+            down_normalized = 0.0
+        
+        if up_normalized > down_normalized:
+            direction = "UP"
+            score_diff = up_normalized - down_normalized
+            raw_confidence = up_normalized
+        elif down_normalized > up_normalized:
+            direction = "DOWN"
+            score_diff = down_normalized - up_normalized
+            raw_confidence = down_normalized
+        else:
+            direction = "UP" if indicators.trend_direction == "UP" else "DOWN"
+            score_diff = 0.0
+            raw_confidence = 0.3
+        
+        confidence = min(1.0, raw_confidence * (1 + score_diff * 0.5))
+        
+        if adx >= self.ADX_STRONG_TREND:
+            confidence = min(1.0, confidence * 1.15)
+        elif adx < self.ADX_NO_TREND:
+            confidence = confidence * 0.85
+        
+        confidence = max(0.0, min(1.0, confidence))
+        
+        logger.debug(
+            f"🎯 Tick Prediction: {direction} (conf={confidence:.2f}) | "
+            f"UP={up_score:.3f} DOWN={down_score:.3f} | "
+            f"Factors: {', '.join(prediction_factors[:4])}"
+        )
+        
+        return direction, round(confidence, 3)
         
     def calculate_all_indicators(self) -> IndicatorValues:
         """
@@ -1631,6 +1892,22 @@ class TradingStrategy:
                 logger.debug(f"⏳ BUY blocked by cooldown: {cooldown_reason}")
                 return result
             
+            pred_direction, pred_confidence = self.predict_tick_direction(look_ahead=5)
+            
+            if pred_direction != "UP":
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"🎯 Prediction conflict: BUY signal but predicted {pred_direction} (conf={pred_confidence:.2f})"
+                logger.info(f"🚫 BUY blocked by prediction: {pred_direction} vs UP required (conf={pred_confidence:.2f})")
+                return result
+            
+            if pred_confidence < self.MIN_PREDICTION_CONFIDENCE:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"🎯 Low prediction confidence: {pred_confidence:.2f} < {self.MIN_PREDICTION_CONFIDENCE} for BUY"
+                logger.info(f"🚫 BUY blocked by low prediction confidence: {pred_confidence:.2f} < {self.MIN_PREDICTION_CONFIDENCE}")
+                return result
+            
             adx_valid, adx_reason, adx_tp_multiplier = self.check_adx_filter(
                 indicators.adx, indicators.plus_di, indicators.minus_di, "BUY"
             )
@@ -1668,11 +1945,12 @@ class TradingStrategy:
                 result.reason = " | ".join(buy_reasons)
                 
                 result.reason += f" | Confluence: {confluence_score:.0f}/100 ({confidence_level})"
+                result.reason += f" | 🎯Pred: {pred_direction} ({pred_confidence:.0%})"
                 
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
+                logger.info(f"🟢 BUY Signal: score={buy_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
                 return result
                 
         if sell_score >= self.MIN_CONFIDENCE_THRESHOLD and sell_score > buy_score:
@@ -1682,6 +1960,22 @@ class TradingStrategy:
                 result.confidence = 0.0
                 result.reason = cooldown_reason
                 logger.debug(f"⏳ SELL blocked by cooldown: {cooldown_reason}")
+                return result
+            
+            pred_direction, pred_confidence = self.predict_tick_direction(look_ahead=5)
+            
+            if pred_direction != "DOWN":
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"🎯 Prediction conflict: SELL signal but predicted {pred_direction} (conf={pred_confidence:.2f})"
+                logger.info(f"🚫 SELL blocked by prediction: {pred_direction} vs DOWN required (conf={pred_confidence:.2f})")
+                return result
+            
+            if pred_confidence < self.MIN_PREDICTION_CONFIDENCE:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"🎯 Low prediction confidence: {pred_confidence:.2f} < {self.MIN_PREDICTION_CONFIDENCE} for SELL"
+                logger.info(f"🚫 SELL blocked by low prediction confidence: {pred_confidence:.2f} < {self.MIN_PREDICTION_CONFIDENCE}")
                 return result
             
             adx_valid, adx_reason, adx_tp_multiplier = self.check_adx_filter(
@@ -1721,11 +2015,12 @@ class TradingStrategy:
                 result.reason = " | ".join(sell_reasons)
                 
                 result.reason += f" | Confluence: {confluence_score:.0f}/100 ({confidence_level})"
+                result.reason += f" | 🎯Pred: {pred_direction} ({pred_confidence:.0%})"
                 
                 if vol_multiplier < 1.0:
                     result.reason += f" | Vol Zone: {vol_zone} ({vol_multiplier:.0%})"
                 
-                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}")
+                logger.info(f"🔴 SELL Signal: score={sell_score:.2f}, confluence={confluence_score:.0f}/100, final_conf={final_confidence:.2f}, ADX={indicators.adx:.1f}, Pred={pred_direction}({pred_confidence:.0%})")
                 return result
                 
         result.signal = Signal.WAIT
