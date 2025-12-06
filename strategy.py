@@ -36,6 +36,14 @@ Enhancement v2.5 - Tick Direction Predictor:
 - ADX trend confirmation for higher prediction confidence
 - Signal blocking when prediction conflicts with signal direction
 - Minimum prediction confidence threshold (0.60)
+
+Enhancement v4.0 - Multi-Horizon Prediction System:
+- Multi-horizon prediction for 1, 3, 5 ticks ahead (contract is 5 ticks)
+- Voting system: only generate signal when 2/3 or 3/3 horizons agree
+- Full agreement (3/3) = +15% confidence boost
+- Per-horizon analysis: momentum, EMA micro-slope, tick sequence pattern
+- Simple, fast calculations optimized for real-time trading
+- Backward compatible with existing prediction system
 =============================================================
 """
 
@@ -272,6 +280,11 @@ class TradingStrategy:
         'hh_ll': 0.05,  # Higher Highs / Lower Lows pattern
         'bollinger': 0.05,  # Bollinger Band position
     }
+    
+    # Multi-Horizon Prediction v4.0 - Consensus-based direction prediction
+    MULTI_HORIZON_LEVELS = [1, 3, 5]  # Predict 1, 3, 5 ticks ahead
+    MULTI_HORIZON_MIN_AGREEMENT = 2  # Minimum horizons that must agree
+    MULTI_HORIZON_FULL_AGREEMENT_BOOST = 0.15  # Confidence boost when all horizons agree
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -1643,10 +1656,279 @@ class TradingStrategy:
         
         return position, round(min(1.0, strength), 2)
     
-    def predict_tick_direction(self, look_ahead: int = 5) -> Tuple[str, float]:
-        """Enhanced Tick Direction Predictor v3.0 for next 5-10 ticks.
+    def _predict_single_horizon(self, horizon: int) -> Tuple[str, float, Dict[str, Any]]:
+        """
+        Predict tick direction for a single horizon using fast, simple calculations.
         
-        Analyzes multiple factors to predict short-term price direction:
+        For each horizon, calculates:
+        1. Short-term momentum (price change over last N ticks)
+        2. EMA micro-slope for that horizon
+        3. Tick sequence pattern (consecutive up/down in last N ticks)
+        
+        Args:
+            horizon: Number of ticks ahead to predict (1, 3, or 5)
+            
+        Returns:
+            Tuple of (direction, confidence, details)
+            - direction: "UP", "DOWN", or "NEUTRAL"
+            - confidence: 0.0 to 1.0
+            - details: Dict with calculation details for debugging
+        """
+        details = {
+            'horizon': horizon,
+            'momentum_score': 0.0,
+            'ema_slope_score': 0.0,
+            'sequence_score': 0.0,
+            'factors': []
+        }
+        
+        min_ticks_needed = max(horizon + 5, 10)
+        if len(self.tick_history) < min_ticks_needed:
+            return "NEUTRAL", 0.0, details
+        
+        up_score = 0.0
+        down_score = 0.0
+        
+        lookback = min(horizon * 3, len(self.tick_history) - 1, 20)
+        if lookback >= 2:
+            recent = self.tick_history[-lookback:]
+            if len(recent) >= 2:
+                price_change = recent[-1] - recent[0]
+                avg_price = safe_divide(sum(recent), len(recent), recent[-1])
+                
+                if avg_price > 0:
+                    momentum_pct = safe_divide(price_change * 100, avg_price, 0.0)
+                    
+                    momentum_threshold = 0.01 * horizon
+                    if momentum_pct > momentum_threshold:
+                        momentum_strength = min(1.0, abs(momentum_pct) / (momentum_threshold * 3) + 0.3)
+                        up_score += 0.35 * momentum_strength
+                        details['momentum_score'] = momentum_strength
+                        details['factors'].append(f"Mom+{momentum_pct:.3f}%")
+                    elif momentum_pct < -momentum_threshold:
+                        momentum_strength = min(1.0, abs(momentum_pct) / (momentum_threshold * 3) + 0.3)
+                        down_score += 0.35 * momentum_strength
+                        details['momentum_score'] = -momentum_strength
+                        details['factors'].append(f"Mom{momentum_pct:.3f}%")
+        
+        ema_lookback = min(horizon + 3, len(self.tick_history) - 1, 10)
+        if ema_lookback >= 3:
+            ema_subset = self.tick_history[-ema_lookback:]
+            
+            if len(ema_subset) >= 3:
+                first_half = ema_subset[:len(ema_subset)//2]
+                second_half = ema_subset[len(ema_subset)//2:]
+                
+                first_avg = safe_divide(sum(first_half), len(first_half), 0.0)
+                second_avg = safe_divide(sum(second_half), len(second_half), 0.0)
+                
+                if first_avg > 0:
+                    slope_pct = safe_divide((second_avg - first_avg) * 100, first_avg, 0.0)
+                    
+                    slope_threshold = 0.005 * horizon
+                    if slope_pct > slope_threshold:
+                        slope_strength = min(1.0, abs(slope_pct) / (slope_threshold * 4) + 0.2)
+                        up_score += 0.35 * slope_strength
+                        details['ema_slope_score'] = slope_strength
+                        details['factors'].append(f"EMA+{slope_pct:.4f}%")
+                    elif slope_pct < -slope_threshold:
+                        slope_strength = min(1.0, abs(slope_pct) / (slope_threshold * 4) + 0.2)
+                        down_score += 0.35 * slope_strength
+                        details['ema_slope_score'] = -slope_strength
+                        details['factors'].append(f"EMA{slope_pct:.4f}%")
+        
+        seq_lookback = min(horizon + 2, len(self.tick_history) - 1, 8)
+        if seq_lookback >= 2:
+            recent = self.tick_history[-seq_lookback:]
+            
+            consecutive_up = 0
+            consecutive_down = 0
+            
+            for i in range(len(recent) - 1, 0, -1):
+                if recent[i] > recent[i-1]:
+                    if consecutive_down == 0:
+                        consecutive_up += 1
+                    else:
+                        break
+                elif recent[i] < recent[i-1]:
+                    if consecutive_up == 0:
+                        consecutive_down += 1
+                    else:
+                        break
+                else:
+                    break
+            
+            min_consecutive = max(2, horizon)
+            
+            if consecutive_up >= min_consecutive:
+                seq_strength = min(1.0, consecutive_up / (min_consecutive + 2))
+                up_score += 0.30 * seq_strength
+                details['sequence_score'] = seq_strength
+                details['factors'].append(f"Seq↑{consecutive_up}")
+            elif consecutive_down >= min_consecutive:
+                seq_strength = min(1.0, consecutive_down / (min_consecutive + 2))
+                down_score += 0.30 * seq_strength
+                details['sequence_score'] = -seq_strength
+                details['factors'].append(f"Seq↓{consecutive_down}")
+        
+        if up_score > down_score and up_score > 0.15:
+            direction = "UP"
+            raw_confidence = up_score
+            score_diff = up_score - down_score
+        elif down_score > up_score and down_score > 0.15:
+            direction = "DOWN"
+            raw_confidence = down_score
+            score_diff = down_score - up_score
+        else:
+            direction = "NEUTRAL"
+            raw_confidence = 0.0
+            score_diff = 0.0
+        
+        confidence = min(1.0, raw_confidence * (1 + score_diff * 0.5))
+        
+        return direction, round(confidence, 3), details
+    
+    def predict_tick_direction_multi_horizon(self) -> Tuple[str, float, Dict[str, Any]]:
+        """
+        Multi-Horizon Tick Direction Predictor v4.0.
+        
+        Predicts tick direction using consensus from multiple time horizons:
+        - 1 tick ahead: Immediate direction
+        - 3 ticks ahead: Short-term direction  
+        - 5 ticks ahead: Medium-term direction (contract expiry)
+        
+        Voting System:
+        - 3/3 horizons agree → Strong signal with +15% confidence boost
+        - 2/3 horizons agree → Normal signal with base confidence
+        - No agreement → NEUTRAL with low confidence
+        
+        Returns:
+            Tuple of (direction, confidence, details)
+            - direction: "UP", "DOWN", or "NEUTRAL"
+            - confidence: 0.0 to 1.0
+            - details: Dict with per-horizon predictions and voting info
+        """
+        details = {
+            'horizons': {},
+            'up_votes': 0,
+            'down_votes': 0,
+            'neutral_votes': 0,
+            'agreement_level': 0,
+            'confidence_boost': 0.0,
+            'final_direction': "NEUTRAL"
+        }
+        
+        if len(self.tick_history) < self.MIN_TICK_HISTORY:
+            logger.debug(f"🔮 Multi-horizon: Insufficient data ({len(self.tick_history)}/{self.MIN_TICK_HISTORY})")
+            return "NEUTRAL", 0.0, details
+        
+        horizon_predictions = []
+        horizon_confidences = []
+        
+        for horizon in self.MULTI_HORIZON_LEVELS:
+            direction, confidence, horizon_details = self._predict_single_horizon(horizon)
+            
+            horizon_predictions.append(direction)
+            horizon_confidences.append(confidence)
+            
+            details['horizons'][horizon] = {
+                'direction': direction,
+                'confidence': confidence,
+                'factors': horizon_details.get('factors', [])
+            }
+            
+            if direction == "UP":
+                details['up_votes'] += 1
+            elif direction == "DOWN":
+                details['down_votes'] += 1
+            else:
+                details['neutral_votes'] += 1
+        
+        up_votes = details['up_votes']
+        down_votes = details['down_votes']
+        total_horizons = len(self.MULTI_HORIZON_LEVELS)
+        
+        if up_votes == total_horizons:
+            final_direction = "UP"
+            details['agreement_level'] = 3
+            details['confidence_boost'] = self.MULTI_HORIZON_FULL_AGREEMENT_BOOST
+            
+            relevant_confs = [c for d, c in zip(horizon_predictions, horizon_confidences) if d == "UP"]
+            base_confidence = safe_divide(sum(relevant_confs), len(relevant_confs), 0.5)
+            final_confidence = min(1.0, base_confidence + self.MULTI_HORIZON_FULL_AGREEMENT_BOOST)
+            
+            logger.info(
+                f"🔮 Multi-horizon FULL AGREEMENT UP: H1={details['horizons'][1]['direction']}({details['horizons'][1]['confidence']:.2f}), "
+                f"H3={details['horizons'][3]['direction']}({details['horizons'][3]['confidence']:.2f}), "
+                f"H5={details['horizons'][5]['direction']}({details['horizons'][5]['confidence']:.2f}) → conf={final_confidence:.2f}"
+            )
+            
+        elif down_votes == total_horizons:
+            final_direction = "DOWN"
+            details['agreement_level'] = 3
+            details['confidence_boost'] = self.MULTI_HORIZON_FULL_AGREEMENT_BOOST
+            
+            relevant_confs = [c for d, c in zip(horizon_predictions, horizon_confidences) if d == "DOWN"]
+            base_confidence = safe_divide(sum(relevant_confs), len(relevant_confs), 0.5)
+            final_confidence = min(1.0, base_confidence + self.MULTI_HORIZON_FULL_AGREEMENT_BOOST)
+            
+            logger.info(
+                f"🔮 Multi-horizon FULL AGREEMENT DOWN: H1={details['horizons'][1]['direction']}({details['horizons'][1]['confidence']:.2f}), "
+                f"H3={details['horizons'][3]['direction']}({details['horizons'][3]['confidence']:.2f}), "
+                f"H5={details['horizons'][5]['direction']}({details['horizons'][5]['confidence']:.2f}) → conf={final_confidence:.2f}"
+            )
+            
+        elif up_votes >= self.MULTI_HORIZON_MIN_AGREEMENT:
+            final_direction = "UP"
+            details['agreement_level'] = up_votes
+            
+            relevant_confs = [c for d, c in zip(horizon_predictions, horizon_confidences) if d == "UP"]
+            base_confidence = safe_divide(sum(relevant_confs), len(relevant_confs), 0.4)
+            final_confidence = base_confidence
+            
+            logger.info(
+                f"🔮 Multi-horizon {up_votes}/3 UP: H1={details['horizons'][1]['direction']}, "
+                f"H3={details['horizons'][3]['direction']}, H5={details['horizons'][5]['direction']} → conf={final_confidence:.2f}"
+            )
+            
+        elif down_votes >= self.MULTI_HORIZON_MIN_AGREEMENT:
+            final_direction = "DOWN"
+            details['agreement_level'] = down_votes
+            
+            relevant_confs = [c for d, c in zip(horizon_predictions, horizon_confidences) if d == "DOWN"]
+            base_confidence = safe_divide(sum(relevant_confs), len(relevant_confs), 0.4)
+            final_confidence = base_confidence
+            
+            logger.info(
+                f"🔮 Multi-horizon {down_votes}/3 DOWN: H1={details['horizons'][1]['direction']}, "
+                f"H3={details['horizons'][3]['direction']}, H5={details['horizons'][5]['direction']} → conf={final_confidence:.2f}"
+            )
+            
+        else:
+            final_direction = "NEUTRAL"
+            details['agreement_level'] = 0
+            final_confidence = 0.25
+            
+            logger.debug(
+                f"🔮 Multi-horizon NO AGREEMENT: UP={up_votes}, DOWN={down_votes}, NEUTRAL={details['neutral_votes']} → NEUTRAL"
+            )
+        
+        details['final_direction'] = final_direction
+        
+        return final_direction, round(final_confidence, 3), details
+    
+    def predict_tick_direction(self, look_ahead: int = 5) -> Tuple[str, float]:
+        """Enhanced Tick Direction Predictor v4.0 with Multi-Horizon Analysis.
+        
+        Now uses multi-horizon prediction (1, 3, 5 ticks ahead) as primary source,
+        with fallback to detailed analysis for additional confirmation.
+        
+        Multi-Horizon Analysis (Primary):
+        - Predicts at 1, 3, and 5 tick horizons
+        - Uses voting system: 2/3 or 3/3 must agree
+        - Full agreement = +15% confidence boost
+        
+        Detailed Analysis (Confirmation/Fallback):
         1. Momentum Analysis: Price acceleration/deceleration (20%)
         2. Tick Sequence Pattern: Consecutive up/down ticks (15%)
         3. EMA Slope Strength: Trend direction from EMA (12%)
@@ -1668,6 +1950,17 @@ class TradingStrategy:
         """
         if len(self.tick_history) < self.MIN_TICK_HISTORY:
             return "UP", 0.0
+        
+        mh_direction, mh_confidence, mh_details = self.predict_tick_direction_multi_horizon()
+        
+        if mh_direction != "NEUTRAL" and mh_details.get('agreement_level', 0) >= self.MULTI_HORIZON_MIN_AGREEMENT:
+            logger.debug(
+                f"🎯 Using Multi-Horizon prediction: {mh_direction} (conf={mh_confidence:.2f}, "
+                f"agreement={mh_details.get('agreement_level')}/3)"
+            )
+            
+            if mh_details.get('agreement_level') == 3:
+                return mh_direction, mh_confidence
         
         indicators = self.last_indicators
         if indicators.rsi == 50.0 and indicators.ema_fast == 0.0:
@@ -1945,11 +2238,29 @@ class TradingStrategy:
         
         confidence = max(0.0, min(1.0, confidence))
         
-        logger.info(
-            f"🎯 Prediction v3: {direction} (conf={confidence:.1%}) | "
-            f"UP={up_normalized:.2f} DOWN={down_normalized:.2f} | "
-            f"Factors: {', '.join(prediction_factors[:5])}"
-        )
+        if mh_direction != "NEUTRAL" and mh_details.get('agreement_level', 0) >= self.MULTI_HORIZON_MIN_AGREEMENT:
+            if mh_direction == direction:
+                confidence = min(1.0, (confidence + mh_confidence) / 2 + 0.05)
+                logger.info(
+                    f"🎯 Prediction v4: {direction} (conf={confidence:.1%}) | "
+                    f"MH={mh_direction}({mh_details.get('agreement_level')}/3) + Detailed AGREE | "
+                    f"Factors: {', '.join(prediction_factors[:4])}"
+                )
+            else:
+                direction = mh_direction
+                confidence = mh_confidence * 0.9
+                logger.info(
+                    f"🎯 Prediction v4: {direction} (conf={confidence:.1%}) | "
+                    f"MH={mh_direction}({mh_details.get('agreement_level')}/3) OVERRIDE detailed | "
+                    f"Detailed was: {('UP' if up_normalized > down_normalized else 'DOWN')}"
+                )
+        else:
+            logger.info(
+                f"🎯 Prediction v4: {direction} (conf={confidence:.1%}) | "
+                f"Detailed analysis (MH={mh_direction}) | "
+                f"UP={up_normalized:.2f} DOWN={down_normalized:.2f} | "
+                f"Factors: {', '.join(prediction_factors[:4])}"
+            )
         
         return direction, round(confidence, 3)
         
