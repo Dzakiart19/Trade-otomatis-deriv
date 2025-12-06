@@ -222,17 +222,17 @@ class TradingStrategy:
     MIN_TICK_HISTORY = 30
     MIN_VOLATILITY = 0.05
     
-    MIN_CONFIDENCE_THRESHOLD = 0.55  # Balanced confidence threshold
+    MIN_CONFIDENCE_THRESHOLD = 0.40  # Lower threshold for more signals
     
     MAX_TICK_HISTORY = 200
     MEMORY_CLEANUP_INTERVAL = 100
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
-    COOLDOWN_SECONDS = 25  # Shorter cooldown for faster markets
+    COOLDOWN_SECONDS = 10  # Faster cooldown for synthetic indices
     VOLUME_HISTORY_SIZE = 20
     EMA_SLOPE_LOOKBACK = 5
-    MIN_CONFLUENCE_SCORE = 45  # Lower threshold - let regime filter do the work
+    MIN_CONFLUENCE_SCORE = 20  # Even lower - focus on basic indicators for 5-tick
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -807,9 +807,10 @@ class TradingStrategy:
             Tuple of (is_valid, reason, tp_multiplier)
         """
         if adx < self.ADX_NO_TREND:
-            reason = f"❌ ADX terlalu lemah: {adx:.1f} < {self.ADX_NO_TREND} (sideways market - HARD BLOCK)"
+            # For synthetic indices, ranging markets can still be traded with caution
+            reason = f"⚠️ ADX lemah: {adx:.1f} < {self.ADX_NO_TREND} (ranging market - reduced TP)"
             logger.debug(reason)
-            return False, reason, 0.0
+            return True, reason, 0.6  # Allow signal with reduced confidence
         
         directional_conflict = False
         conflict_warning = False
@@ -832,12 +833,12 @@ class TradingStrategy:
         
         if conflict_warning:
             di_diff = abs(plus_di - minus_di)
-            if di_diff >= 10:
-                reason = f"❌ ADX strong directional conflict: {signal_type} vs {di_info} (diff={di_diff:.1f})"
+            if di_diff >= 15:  # Increased threshold for hard block
+                reason = f"⚠️ ADX directional conflict: {signal_type} vs {di_info} (diff={di_diff:.1f}), TP reduced"
                 logger.debug(reason)
-                return False, reason, 0.0
+                return True, reason, 0.5  # Allow signal with reduced confidence instead of blocking
             else:
-                reason = f"⚠️ ADX directional conflict warning: {signal_type} vs {di_info} (diff={di_diff:.1f}), TP reduced to 0.7x"
+                reason = f"⚠️ ADX directional conflict minor: {signal_type} vs {di_info} (diff={di_diff:.1f})"
                 logger.debug(reason)
                 return True, reason, 0.7
         
@@ -1612,13 +1613,6 @@ class TradingStrategy:
         is_ranging = indicators.adx < self.ADX_NO_TREND
         
         if buy_score >= self.MIN_CONFIDENCE_THRESHOLD and buy_score > sell_score:
-            # In trending market, require stronger RSI extreme for mean-reversion
-            if is_trending and indicators.rsi > 25:
-                result.signal = Signal.WAIT
-                result.confidence = 0.0
-                result.reason = f"BUY blocked: Trending market (ADX={indicators.adx:.1f}) needs RSI < 25, got {indicators.rsi:.1f}"
-                logger.debug(f"⏳ BUY blocked: Trending market needs stronger RSI extreme")
-                return result
             cooldown_ok, cooldown_reason = self.should_generate_signal("BUY")
             if not cooldown_ok:
                 result.signal = Signal.WAIT
@@ -1672,13 +1666,6 @@ class TradingStrategy:
                 return result
                 
         if sell_score >= self.MIN_CONFIDENCE_THRESHOLD and sell_score > buy_score:
-            # In trending market, require stronger RSI extreme for mean-reversion
-            if is_trending and indicators.rsi < 75:
-                result.signal = Signal.WAIT
-                result.confidence = 0.0
-                result.reason = f"SELL blocked: Trending market (ADX={indicators.adx:.1f}) needs RSI > 75, got {indicators.rsi:.1f}"
-                logger.debug(f"⏳ SELL blocked: Trending market needs stronger RSI extreme")
-                return result
             cooldown_ok, cooldown_reason = self.should_generate_signal("SELL")
             if not cooldown_ok:
                 result.signal = Signal.WAIT
@@ -1736,7 +1723,8 @@ class TradingStrategy:
         ema_trend = self.check_ema_trend()
         result.reason = f"RSI={indicators.rsi:.1f} | ADX={indicators.adx:.1f} | EMA Trend={ema_trend} | Waiting for clear signal"
         
-        logger.debug(f"⏳ WAIT: buy_score={buy_score:.2f}, sell_score={sell_score:.2f}, ADX={indicators.adx:.1f}")
+        # Log more details at INFO level for debugging signal generation
+        logger.info(f"⏳ WAIT: buy={buy_score:.2f} sell={sell_score:.2f} need={self.MIN_CONFIDENCE_THRESHOLD} | RSI={indicators.rsi:.1f} ADX={indicators.adx:.1f}")
         
         return result
         
