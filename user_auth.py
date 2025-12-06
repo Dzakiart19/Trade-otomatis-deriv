@@ -75,7 +75,8 @@ class UserAuthManager:
     def _init_encryption(self):
         """Inisialisasi Fernet encryption dengan key dari environment atau persistent file"""
         secret = os.environ.get("SESSION_SECRET", "")
-        secret_file = ".session_secret"
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        secret_file = os.path.join(base_dir, ".session_secret")
         
         if not secret:
             if os.path.exists(secret_file):
