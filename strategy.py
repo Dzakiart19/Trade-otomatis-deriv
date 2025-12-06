@@ -725,14 +725,15 @@ class TradingStrategy:
         """Calculate volatility zone based on ATR percentage.
         
         Adjusted for Synthetic Indices which have higher natural volatility.
+        Synthetic indices like R_100, R_75 etc naturally have 1-3% volatility.
         
         Returns:
             Tuple of (zone_name, multiplier)
             - EXTREME_LOW (< 0.01%): 0.5x - Very low volatility, risky
-            - LOW (0.01-0.05%): 0.7x - Low volatility, caution
-            - NORMAL (0.05-0.2%): 1.0x - Normal trading conditions for synthetics
-            - HIGH (0.2-0.5%): 0.85x - High volatility, reduced size
-            - EXTREME_HIGH (> 0.5%): 0.7x - Extreme volatility, reduced size
+            - LOW (0.01-0.1%): 0.7x - Low volatility, caution
+            - NORMAL (0.1-1.0%): 1.0x - Normal trading conditions for synthetics
+            - HIGH (1.0-2.5%): 0.85x - High volatility, reduced size
+            - EXTREME_HIGH (> 2.5%): 0.7x - Extreme volatility, reduced size
         """
         if not self.tick_history or len(self.tick_history) < self.ATR_PERIOD + 1:
             return "UNKNOWN", 1.0
@@ -749,11 +750,11 @@ class TradingStrategy:
         
         if atr_pct < 0.01:
             return "EXTREME_LOW", 0.5
-        elif atr_pct < 0.05:
+        elif atr_pct < 0.1:
             return "LOW", 0.7
-        elif atr_pct < 0.2:
+        elif atr_pct < 1.0:
             return "NORMAL", 1.0
-        elif atr_pct < 0.5:
+        elif atr_pct < 2.5:
             return "HIGH", 0.85
         else:
             return "EXTREME_HIGH", 0.7

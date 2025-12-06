@@ -111,6 +111,17 @@ Do not make changes to the file `Y`.
 - **Security**: Deriv API tokens and Telegram bot tokens are stored as encrypted environment variables (Replit Secrets). WebSocket communication uses WSS for encryption.
 - **Startup (v2.8)**: Bot starts dengan async pattern dan delete_webhook untuk menghindari Telegram polling conflict. Tidak memerlukan Flask keep-alive server.
 
+## Deployment (Koyeb - Free Tier 24/7)
+- **Platform**: Koyeb dengan Docker
+- **Instance**: eco-small (FREE - 512MB RAM)
+- **Type**: Worker (bukan Web)
+- **Files**: `Dockerfile`, `requirements.txt`, `koyeb.yaml`, `.dockerignore`
+- **Guide**: Lihat `DEPLOY_KOYEB.md` untuk langkah lengkap
+- **Secrets yang dibutuhkan**:
+    - `TELEGRAM_BOT_TOKEN`: Token bot Telegram
+    - `DERIV_APP_ID`: App ID dari Deriv
+    - `SESSION_SECRET`: Random string untuk enkripsi
+
 ## External Dependencies
 - `python-telegram-bot`: For Telegram API interaction and bot functionality.
 - `websocket-client`: For real-time WebSocket communication with the Deriv API.

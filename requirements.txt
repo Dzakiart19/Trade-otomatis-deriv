@@ -1,0 +1,9 @@
+cryptography>=46.0.3
+fastapi>=0.123.10
+flask>=3.1.2
+python-dotenv>=1.2.1
+python-telegram-bot>=22.5
+requests>=2.32.5
+uvicorn>=0.38.0
+websocket-client>=1.9.0
+websockets>=15.0.1

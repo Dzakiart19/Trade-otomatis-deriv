@@ -1,0 +1,23 @@
+name: deriv-trading-bot
+type: worker
+docker:
+  dockerfile: Dockerfile
+env:
+  - key: PYTHONUNBUFFERED
+    value: "1"
+  - key: TZ
+    value: "Asia/Jakarta"
+  - key: TELEGRAM_BOT_TOKEN
+    value: "@secret:TELEGRAM_BOT_TOKEN"
+  - key: DERIV_APP_ID
+    value: "@secret:DERIV_APP_ID"
+  - key: SESSION_SECRET
+    value: "@secret:SESSION_SECRET"
+regions:
+  - fra
+instance_types:
+  - eco-small
+scaling:
+  min: 1
+  max: 1
+health_checks: []
