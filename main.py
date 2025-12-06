@@ -56,6 +56,7 @@ from event_bus import get_event_bus
 
 USD_TO_IDR = 15800
 CHAT_ID_FILE = "logs/active_chat_id.txt"
+USER_CHAT_MAPPING_FILE = "logs/chat_mapping.json"
 
 load_dotenv()
 
@@ -160,8 +161,10 @@ MIN_NOTIFICATION_INTERVAL: float = 2.0
 current_connected_user_id: Optional[int] = None
 
 import threading
+import json
 _chat_id_lock = threading.Lock()
 _deriv_lock = threading.Lock()
+_user_chat_mapping_lock = threading.Lock()
 
 _last_message_hashes: Dict[str, float] = {}
 _MESSAGE_HASH_TTL: int = 60
@@ -171,9 +174,57 @@ _last_send_time: Dict[int, float] = {}
 _MIN_SEND_INTERVAL: float = 1.0
 _rate_limit_lock = threading.Lock()
 
+user_chat_mapping: Dict[int, int] = {}
+
+
+def load_user_chat_mapping() -> Dict[int, int]:
+    """Load user_id -> chat_id mapping dari file JSON (thread-safe)"""
+    global user_chat_mapping
+    with _user_chat_mapping_lock:
+        try:
+            if os.path.exists(USER_CHAT_MAPPING_FILE):
+                with open(USER_CHAT_MAPPING_FILE, "r") as f:
+                    data = json.load(f)
+                    user_chat_mapping = {int(k): int(v) for k, v in data.items()}
+                    logger.info(f"📂 User chat mapping loaded: {len(user_chat_mapping)} users")
+                    return user_chat_mapping
+        except Exception as e:
+            logger.error(f"Failed to load user chat mapping: {e}")
+        return {}
+
+
+def save_user_chat_mapping() -> bool:
+    """Save user_chat_mapping ke file JSON (thread-safe)"""
+    global user_chat_mapping
+    with _user_chat_mapping_lock:
+        try:
+            os.makedirs("logs", exist_ok=True)
+            with open(USER_CHAT_MAPPING_FILE, "w") as f:
+                json.dump({str(k): v for k, v in user_chat_mapping.items()}, f)
+            logger.info(f"💾 User chat mapping saved: {len(user_chat_mapping)} users")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save user chat mapping: {e}")
+            return False
+
+
+def save_user_chat_id(user_id: int, chat_id: int) -> bool:
+    """Save chat_id untuk user tertentu ke mapping (thread-safe)"""
+    global user_chat_mapping
+    with _user_chat_mapping_lock:
+        user_chat_mapping[user_id] = chat_id
+        logger.info(f"💾 Chat ID saved for user {user_id}: {chat_id}")
+    return save_user_chat_mapping()
+
+
+def get_user_chat_id(user_id: int) -> Optional[int]:
+    """Get chat_id untuk user tertentu dari mapping (thread-safe)"""
+    with _user_chat_mapping_lock:
+        return user_chat_mapping.get(user_id)
+
 
 def save_chat_id(chat_id: int) -> bool:
-    """Save chat_id ke file untuk persistence setelah restart (thread-safe)"""
+    """Save chat_id ke file untuk persistence setelah restart (thread-safe) - DEPRECATED"""
     with _chat_id_lock:
         try:
             os.makedirs("logs", exist_ok=True)
@@ -187,7 +238,7 @@ def save_chat_id(chat_id: int) -> bool:
 
 
 def load_chat_id() -> Optional[int]:
-    """Load chat_id dari file setelah bot restart (thread-safe)"""
+    """Load chat_id dari file setelah bot restart (thread-safe) - DEPRECATED"""
     with _chat_id_lock:
         try:
             if os.path.exists(CHAT_ID_FILE):
@@ -1574,10 +1625,13 @@ def _check_rate_limit(chat_id: int) -> bool:
         return True
 
 
-def send_telegram_message_sync(token: str, message: str, use_html: bool = False):
+def send_telegram_message_sync(token: str, message: str, user_id: Optional[int] = None, use_html: bool = False):
     """
     Helper synchronous untuk kirim pesan ke Telegram dari thread lain.
     Menggunakan requests library untuk menghindari masalah asyncio event loop.
+    
+    SECURITY FIX: Sekarang menggunakan user_id untuk mencari chat_id dari mapping.
+    Ini mencegah notifikasi trading dikirim ke user yang salah.
     
     Features:
     - Thread-safe dengan locking
@@ -1590,19 +1644,29 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
     Args:
         token: Bot token
         message: Pesan yang akan dikirim
+        user_id: Telegram user ID untuk mencari chat_id (REQUIRED untuk trading notifications)
         use_html: Jika True, gunakan HTML parse mode, jika False coba Markdown lalu plain text
     """
     global active_chat_id, chat_id_confirmed
     
-    with _chat_id_lock:
-        current_chat_id = active_chat_id
-        is_confirmed = chat_id_confirmed
+    chat_id_to_use = None
     
-    if not current_chat_id or not is_confirmed:
-        logger.warning("No active chat_id or not confirmed. Please send /start to the bot first.")
-        return False
-    
-    chat_id_to_use = current_chat_id
+    if user_id is not None:
+        chat_id_to_use = get_user_chat_id(user_id)
+        if not chat_id_to_use:
+            logger.warning(f"No chat_id found for user {user_id}. User needs to /start the bot first.")
+            return False
+        logger.debug(f"Using chat_id {chat_id_to_use} for user {user_id}")
+    else:
+        with _chat_id_lock:
+            current_chat_id = active_chat_id
+            is_confirmed = chat_id_confirmed
+        
+        if not current_chat_id or not is_confirmed:
+            logger.warning("No active chat_id or not confirmed. Please send /start to the bot first.")
+            return False
+        
+        chat_id_to_use = current_chat_id
     
     if _is_duplicate_message(message, chat_id_to_use):
         logger.info(f"Skipping duplicate message to chat {chat_id_to_use}")
@@ -1691,10 +1755,13 @@ def send_telegram_message_sync(token: str, message: str, use_html: bool = False)
 def setup_trading_callbacks(telegram_token: str):
     """Setup callback functions untuk notifikasi trading
     
+    SECURITY FIX: Semua callback sekarang menggunakan current_connected_user_id
+    untuk memastikan notifikasi hanya dikirim ke user yang sedang trading.
+    
     Args:
         telegram_token: Token bot Telegram untuk mengirim pesan
     """
-    global trading_manager
+    global trading_manager, current_connected_user_id
     
     if not trading_manager:
         return
@@ -1702,7 +1769,13 @@ def setup_trading_callbacks(telegram_token: str):
     def on_trade_opened(contract_type: str, price: float, stake: float, 
                        trade_num: int, target: int):
         """Callback saat posisi dibuka"""
-        logger.info(f"📤 on_trade_opened callback INVOKED: type={contract_type}, trade={trade_num}")
+        user_id = current_connected_user_id
+        logger.info(f"📤 on_trade_opened callback INVOKED: type={contract_type}, trade={trade_num}, user_id={user_id}")
+        
+        if not user_id:
+            logger.error("❌ on_trade_opened: No user_id available, skipping notification")
+            return
+            
         target_text = f"/{target}" if target > 0 else ""
         stake_idr = stake * USD_TO_IDR
         message = (
@@ -1711,13 +1784,19 @@ def setup_trading_callbacks(telegram_token: str):
             f"• Entry: {price:.5f}\n"
             f"• Stake: ${stake:.2f} (Rp {stake_idr:,.0f})"
         )
-        result = send_telegram_message_sync(telegram_token, message)
-        logger.info(f"📤 on_trade_opened message sent: {result}")
+        result = send_telegram_message_sync(telegram_token, message, user_id=user_id)
+        logger.info(f"📤 on_trade_opened message sent to user {user_id}: {result}")
         
     def on_trade_closed(is_win: bool, profit: float, balance: float,
                        trade_num: int, target: int, next_stake: float):
         """Callback saat posisi ditutup (win/loss)"""
-        logger.info(f"📥 on_trade_closed callback INVOKED: win={is_win}, profit={profit}, trade={trade_num}")
+        user_id = current_connected_user_id
+        logger.info(f"📥 on_trade_closed callback INVOKED: win={is_win}, profit={profit}, trade={trade_num}, user_id={user_id}")
+        
+        if not user_id:
+            logger.error("❌ on_trade_closed: No user_id available, skipping notification")
+            return
+            
         target_text = f"/{target}" if target > 0 else ""
         profit_idr = profit * USD_TO_IDR
         balance_idr = balance * USD_TO_IDR
@@ -1737,12 +1816,19 @@ def setup_trading_callbacks(telegram_token: str):
                 f"• Next Stake: ${next_stake:.2f} (Rp {next_stake_idr:,.0f})"
             )
             
-        result = send_telegram_message_sync(telegram_token, message)
-        logger.info(f"📥 on_trade_closed message sent: {result}")
+        result = send_telegram_message_sync(telegram_token, message, user_id=user_id)
+        logger.info(f"📥 on_trade_closed message sent to user {user_id}: {result}")
         
     def on_session_complete(total: int, wins: int, losses: int, 
                            profit: float, win_rate: float):
         """Callback saat session selesai"""
+        user_id = current_connected_user_id
+        logger.info(f"🏁 on_session_complete callback INVOKED: total={total}, user_id={user_id}")
+        
+        if not user_id:
+            logger.error("❌ on_session_complete: No user_id available, skipping notification")
+            return
+            
         profit_emoji = "📈" if profit >= 0 else "📉"
         profit_idr = profit * USD_TO_IDR
         message = (
@@ -1753,19 +1839,33 @@ def setup_trading_callbacks(telegram_token: str):
             f"• Win Rate: {win_rate:.1f}%\n\n"
             f"{profit_emoji} Net P/L: ${profit:+.2f} (Rp {profit_idr:+,.0f})"
         )
-        send_telegram_message_sync(telegram_token, message)
+        result = send_telegram_message_sync(telegram_token, message, user_id=user_id)
+        logger.info(f"🏁 on_session_complete message sent to user {user_id}: {result}")
         
     def on_error(error_msg: str):
         """Callback saat terjadi error"""
+        user_id = current_connected_user_id
+        logger.info(f"⚠️ on_error callback INVOKED: error={error_msg[:50]}..., user_id={user_id}")
+        
+        if not user_id:
+            logger.error("❌ on_error: No user_id available, skipping notification")
+            return
+            
         message = f"⚠️ **ERROR**\n\n{error_msg}"
-        send_telegram_message_sync(telegram_token, message)
+        result = send_telegram_message_sync(telegram_token, message, user_id=user_id)
+        logger.info(f"⚠️ on_error message sent to user {user_id}: {result}")
     
     def on_progress(tick_count: int, required_ticks: int, rsi: float, trend: str):
         """Callback untuk progress notification saat mengumpulkan data"""
         global last_progress_notification_time
+        user_id = current_connected_user_id
         
         try:
-            logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}")
+            logger.info(f"📊 on_progress called: tick={tick_count}/{required_ticks}, rsi={rsi}, trend={trend}, user_id={user_id}")
+            
+            if not user_id:
+                logger.warning("⚠️ on_progress: No user_id available, skipping notification")
+                return
             
             current_time = time.time()
             time_since_last = current_time - last_progress_notification_time
@@ -1791,12 +1891,12 @@ def setup_trading_callbacks(telegram_token: str):
                 f"⏳ Menunggu sinyal trading..."
             )
             
-            result = send_telegram_message_sync(telegram_token, message)
+            result = send_telegram_message_sync(telegram_token, message, user_id=user_id)
             if result:
                 last_progress_notification_time = current_time
-                logger.info(f"✅ Progress message sent successfully")
+                logger.info(f"✅ Progress message sent successfully to user {user_id}")
             else:
-                logger.warning(f"⚠️ Progress message not sent (no chat_id or error)")
+                logger.warning(f"⚠️ Progress message not sent to user {user_id} (no chat_id or error)")
         except Exception as e:
             logger.error(f"❌ Error in on_progress callback: {type(e).__name__}: {e}")
             import traceback
