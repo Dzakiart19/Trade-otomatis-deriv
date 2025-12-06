@@ -253,7 +253,7 @@ class TradingManager:
     MARTINGALE_MULTIPLIER = 2.0  # Reduced from 2.1 for better risk management
     MAX_MARTINGALE_LEVEL = 5  # Increased to 5 levels for better recovery chance (user requested)
     
-    MAX_LOSS_PERCENT = 0.15  # Reduced from 0.20 for more conservative risk
+    MAX_LOSS_PERCENT = 1.0  # DISABLED - hanya gunakan consecutive loss check (user requested)
     MAX_CONSECUTIVE_LOSSES = 5  # Allow 5 consecutive losses before stopping (user requested)
     TRADE_COOLDOWN_SECONDS = 4.0  # Increased from 3.0 for better entry timing
     MAX_BUY_RETRY = 5
@@ -1744,18 +1744,10 @@ class TradingManager:
             self.is_processing_signal = False
             return
         
-        # RISK CHECK 2: Cek max loss limit (20% dari balance awal)
-        if self.stats.starting_balance > 0:
-            max_loss = self.stats.starting_balance * self.MAX_LOSS_PERCENT
-            current_loss = self.stats.starting_balance - current_balance
-            if current_loss >= max_loss:
-                logger.warning(f"⚠️ Max loss limit reached! Loss: ${current_loss:.2f} >= ${max_loss:.2f}")
-                if self.on_error:
-                    self.on_error(f"Trading dihentikan! Max loss {self.MAX_LOSS_PERCENT*100:.0f}% tercapai. Loss: ${current_loss:.2f}")
-                self.is_processing_signal = False
-                self.signal_processing_start_time = 0.0
-                self._complete_session()
-                return
+        # RISK CHECK 2: Cek max loss limit (DISABLED - only consecutive loss matters)
+        # User requested: hanya 5x consecutive loss yang menghentikan trading
+        # MAX_LOSS_PERCENT = 1.0 (100%) sehingga praktis tidak aktif
+        # Check ini tetap ada sebagai safety net untuk extreme case
         
         # RISK CHECK 3: Cek daily loss limit (HANYA untuk akun REAL, skip untuk DEMO)
         # Gunakan current_account_type karena lebih reliable daripada account_info.is_virtual

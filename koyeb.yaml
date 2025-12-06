@@ -29,11 +29,10 @@ scaling:
   min: 1
   max: 1
 health_checks:
-  - type: http
+  - type: tcp
     port: 8000
-    path: /health
-    interval_seconds: 60
-    timeout_seconds: 30
+    interval_seconds: 120
+    timeout_seconds: 60
     healthy_threshold: 1
-    unhealthy_threshold: 5
-    grace_period: 180
+    unhealthy_threshold: 10
+    grace_period: 300
