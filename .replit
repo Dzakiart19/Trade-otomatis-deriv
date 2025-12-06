@@ -23,12 +23,12 @@ name = "Deriv Trading Bot"
 author = "agent"
 
 [workflows.workflow.metadata]
-outputType = "webview"
+outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
-waitForPort = 5000
+waitForPort = 8000
 
 [[ports]]
 localPort = 5000
@@ -37,7 +37,3 @@ externalPort = 80
 [[ports]]
 localPort = 8000
 externalPort = 8000
-
-[[ports]]
-localPort = 37683
-externalPort = 3000
