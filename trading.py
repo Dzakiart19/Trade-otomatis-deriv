@@ -943,14 +943,26 @@ class TradingManager:
         # Log analytics summary
         logger.info(self.analytics.get_summary())
         
+        # Debug: Check if callback is set
+        logger.info(f"📞 on_session_complete callback check: {self.on_session_complete is not None}")
+        
         if self.on_session_complete:
-            self.on_session_complete(
-                self.stats.total_trades,
-                self.stats.wins,
-                self.stats.losses,
-                self.stats.total_profit,
-                self.stats.win_rate
-            )
+            try:
+                logger.info(f"📞 Calling on_session_complete callback...")
+                self.on_session_complete(
+                    self.stats.total_trades,
+                    self.stats.wins,
+                    self.stats.losses,
+                    self.stats.total_profit,
+                    self.stats.win_rate
+                )
+                logger.info(f"📞 on_session_complete callback completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error calling on_session_complete: {type(e).__name__}: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.warning("⚠️ on_session_complete callback is None, skipping notification")
     
     def _reset_processing_state(self):
         """Reset semua flags dan state untuk mencegah deadlock"""
