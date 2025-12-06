@@ -36,6 +36,7 @@ import logging
 import json
 import shutil
 import tempfile
+import threading
 from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
@@ -303,8 +304,9 @@ class TradingManager:
         self.current_trade_type: Optional[str] = None
         self.entry_price: float = 0.0
         
-        # ANTI-DOUBLE BUY: Flag untuk mencegah eksekusi concurrent
+        # ANTI-DOUBLE BUY: Flag dan Lock untuk mencegah eksekusi concurrent
         self.is_processing_signal: bool = False
+        self._signal_lock = threading.RLock()  # Thread-safe reentrant lock untuk signal processing
         self.last_trade_time: float = 0.0
         self.buy_retry_count: int = 0
         self.signal_processing_start_time: float = 0.0  # Untuk timeout detection
@@ -1434,7 +1436,11 @@ class TradingManager:
         """
         Cek signal dari strategi dan eksekusi jika ada.
         Dipanggil setiap tick baru masuk.
+        
+        Thread-safe menggunakan _signal_lock untuk mencegah concurrent trade execution.
         """
+        import time as time_module
+        
         # ANTI-DOUBLE BUY: Double check state dan processing flag
         if self.state != TradingState.RUNNING:
             return
@@ -1443,35 +1449,49 @@ class TradingManager:
             logger.debug("Signal processing already in progress, skipping...")
             return
         
-        # Task 1 FIX: Check circuit breaker sebelum analyze signal
-        if self._check_circuit_breaker():
-            logger.debug("Circuit breaker active, skipping signal check")
+        # Try to acquire lock non-blocking - skip if another thread already has it
+        if not self._signal_lock.acquire(blocking=False):
+            logger.debug("Signal lock held by another thread, skipping...")
             return
         
-        # Task 1 FIX: Check apakah ada pending buy timeout
-        if self._check_buy_timeout():
-            # State sudah di-reset oleh _check_buy_timeout
-            logger.debug("Buy timeout detected, state reset")
-            return
+        try:
+            # Double-check flag inside lock (thread-safe check)
+            if self.is_processing_signal:
+                logger.debug("Signal processing flag set (after lock), skipping...")
+                return
             
-        # Dapatkan analisis dari strategy
-        analysis = self.strategy.analyze()
-        
-        if analysis.signal == Signal.WAIT:
-            # Tidak ada signal, lanjut menunggu
-            return
+            # Task 1 FIX: Check circuit breaker sebelum analyze signal
+            if self._check_circuit_breaker():
+                logger.debug("Circuit breaker active, skipping signal check")
+                return
             
-        # Ada signal! Set flag processing SEBELUM eksekusi
-        import time as time_module
-        self.is_processing_signal = True
-        self.signal_processing_start_time = time_module.time()
-        
-        contract_type = analysis.signal.value  # "CALL" atau "PUT"
-        
-        logger.info(f"📊 Signal: {contract_type} | RSI: {analysis.rsi_value} | "
-                   f"Confidence: {analysis.confidence:.2f} | Reason: {analysis.reason}")
-        
-        self._execute_trade(contract_type)
+            # Task 1 FIX: Check apakah ada pending buy timeout
+            if self._check_buy_timeout():
+                # State sudah di-reset oleh _check_buy_timeout
+                logger.debug("Buy timeout detected, state reset")
+                return
+                
+            # Dapatkan analisis dari strategy
+            analysis = self.strategy.analyze()
+            
+            if analysis.signal == Signal.WAIT:
+                # Tidak ada signal, lanjut menunggu
+                return
+                
+            # Ada signal! Set flag processing SEBELUM eksekusi (inside lock)
+            self.is_processing_signal = True
+            self.signal_processing_start_time = time_module.time()
+            
+            contract_type = analysis.signal.value  # "CALL" atau "PUT"
+            
+            logger.info(f"📊 Signal: {contract_type} | RSI: {analysis.rsi_value} | "
+                       f"Confidence: {analysis.confidence:.2f} | Reason: {analysis.reason}")
+            
+            # Execute trade while holding lock to prevent concurrent execution
+            self._execute_trade(contract_type)
+        finally:
+            # Always release lock
+            self._signal_lock.release()
         
     def _calculate_martingale_projection(self, levels: int = 3) -> float:
         """

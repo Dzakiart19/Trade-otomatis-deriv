@@ -1303,9 +1303,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if deriv_ws and deriv_ws.is_ready():
                 pair_scanner.start_scanning()
                 logger.info("✅ PairScanner re-started")
-            
-        scanner_status = pair_scanner.get_scanner_status()
-        recommendations = pair_scanner.get_recommendations(top_n=5)
+        
+        snapshot = pair_scanner.get_snapshot(top_n=5)
+        scanner_status = snapshot['scanner_status']
+        recommendations = snapshot['recommendations']
+        pairs_analyzed = snapshot['pairs_analyzed']
+        pairs_with_signal = snapshot['pairs_with_signal']
         
         if not recommendations:
             if scanner_status['symbols_with_data'] == 0:
@@ -1318,29 +1321,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Tunggu 30-60 detik untuk data cukup."
                 )
             else:
-                all_pairs = pair_scanner.get_all_pair_status()
-                pairs_analyzed = [p for p in all_pairs if p.get('has_enough_data', False)]
-                
                 rec_text = (
                     "🎯 **REKOMENDASI SAAT INI**\n\n"
-                    "⚠️ **Tidak ada signal aktif**\n\n"
                     f"• {scanner_status['symbols_with_data']} pairs sudah dianalisis\n"
                     f"• {scanner_status['symbols_with_signal']} dengan signal\n\n"
                 )
                 
-                if pairs_analyzed:
+                if pairs_with_signal:
+                    rec_text += "📊 **Pairs dengan Signal:**\n"
+                    for p in pairs_with_signal[:8]:
+                        signal_emoji = "🟢" if p.get('signal') == "CALL" else "🔴"
+                        safe_name = p['name'].replace('_', ' ')
+                        rec_text += f"• {signal_emoji} {safe_name}: {p.get('signal', 'WAIT')} (Score: {p.get('score', 0):.0f})\n"
+                    rec_text += "\n"
+                elif pairs_analyzed:
                     rec_text += "📊 **Pairs yang dianalisis:**\n"
                     for p in pairs_analyzed[:8]:
                         trend_icon = "📈" if p.get('trend_direction') == "UP" else ("📉" if p.get('trend_direction') == "DOWN" else "➡️")
-                        rec_text += f"• {p['name']} ({p['symbol']}): {trend_icon} {p.get('trend_direction', 'SIDEWAYS')}\n"
+                        safe_name = p['name'].replace('_', ' ')
+                        rec_text += f"• {safe_name}: {trend_icon} {p.get('trend_direction', 'SIDEWAYS')}\n"
                     rec_text += "\n"
                 
-                rec_text += "Semua pair sedang SIDEWAYS. Tunggu atau pilih manual."
+                if not pairs_with_signal:
+                    rec_text += "⚠️ Tidak ada signal aktif saat ini.\nSemua pair sedang SIDEWAYS. Tunggu atau pilih manual."
+                else:
+                    rec_text += "✅ Ada signal aktif! Pilih pair di bawah atau pilih manual."
+            
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh", callback_data="menu_recommendations")],
                 [InlineKeyboardButton("📊 Pilih Manual", callback_data="select_symbol")],
                 [InlineKeyboardButton("« Kembali", callback_data="menu_autotrade")]
             ]
+            
+            if pairs_with_signal:
+                signal_buttons = []
+                for p in pairs_with_signal[:4]:
+                    signal_emoji = "🟢" if p.get('signal') == "CALL" else "🔴"
+                    btn_text = f"{signal_emoji} {p['symbol']}"
+                    signal_buttons.append(InlineKeyboardButton(btn_text, callback_data=f"rec_trade~{p['symbol']}"))
+                if signal_buttons:
+                    keyboard.insert(0, signal_buttons[:2])
+                    if len(signal_buttons) > 2:
+                        keyboard.insert(1, signal_buttons[2:4])
         else:
             rec_text = (
                 "🎯 **REKOMENDASI SAAT INI**\n\n"
@@ -1351,9 +1373,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, rec in enumerate(recommendations, 1):
                 signal_emoji = "🟢" if rec['signal'] == "CALL" else "🔴"
                 trend_emoji = "📈" if rec['trend_direction'] == "UP" else ("📉" if rec['trend_direction'] == "DOWN" else "➡️")
+                safe_name = rec['name'].replace('_', ' ')
                 
                 rec_text += (
-                    f"**{i}. {rec['name']}** {signal_emoji}\n"
+                    f"**{i}. {safe_name}** {signal_emoji}\n"
                     f"   Signal: {rec['signal']} | Score: {rec['score']:.0f}/100\n"
                     f"   RSI: {rec['rsi']:.1f} | ADX: {rec['adx']:.1f}\n"
                     f"   Trend: {trend_emoji} {rec['trend_direction']}\n"

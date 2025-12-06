@@ -626,6 +626,62 @@ class PairScanner:
             "scan_interval": self.scan_interval,
             "min_ticks_required": self.min_ticks_required
         }
+    
+    def get_snapshot(self, top_n: int = 5) -> dict:
+        """
+        Dapatkan snapshot lengkap dari scanner (atomic - satu kali fetch).
+        
+        Method ini menggabungkan get_all_pair_status, get_scanner_status,
+        dan get_recommendations dalam satu panggilan untuk menghindari
+        race condition antara calls yang terpisah.
+        
+        Args:
+            top_n: Jumlah rekomendasi teratas yang diinginkan
+            
+        Returns:
+            Dict dengan:
+            - scanner_status: Status scanner
+            - recommendations: List pairs dengan signal aktif (top N)
+            - all_pairs: Semua pairs dengan datanya
+            - pairs_with_signal: Pairs yang punya signal CALL/PUT
+        """
+        all_status = self.get_all_pair_status()
+        
+        symbols_with_data = sum(1 for s in all_status if s["has_enough_data"])
+        symbols_with_signal = sum(
+            1 for s in all_status 
+            if s["signal"] in ["CALL", "PUT"] and s["has_enough_data"]
+        )
+        
+        active_signals = [
+            pair for pair in all_status
+            if pair["signal"] in ["CALL", "PUT"] and pair["has_enough_data"]
+        ]
+        active_signals.sort(key=lambda x: x["score"], reverse=True)
+        
+        recommendations = active_signals[:top_n]
+        
+        pairs_analyzed = [p for p in all_status if p.get('has_enough_data', False)]
+        
+        logger.info(
+            f"📊 Snapshot: {len(recommendations)} recommendations, "
+            f"{symbols_with_signal} with signal, {symbols_with_data} with data"
+        )
+        
+        return {
+            "scanner_status": {
+                "is_scanning": self.is_scanning,
+                "total_symbols": len(self.strategies),
+                "symbols_with_data": symbols_with_data,
+                "symbols_with_signal": symbols_with_signal,
+                "scan_interval": self.scan_interval,
+                "min_ticks_required": self.min_ticks_required
+            },
+            "recommendations": recommendations,
+            "all_pairs": all_status,
+            "pairs_analyzed": pairs_analyzed,
+            "pairs_with_signal": active_signals
+        }
         
     def clear_all_data(self) -> None:
         """
