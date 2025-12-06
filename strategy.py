@@ -268,21 +268,70 @@ class TradingStrategy:
     PREDICTION_HIGHER_HIGHS_LOOKBACK = 12  # Ticks to detect HH/LL patterns
     PREDICTION_BOLLINGER_PERIOD = 20  # Bollinger Bands period
     PREDICTION_BOLLINGER_STD = 2.0  # Bollinger Bands standard deviation multiplier
+    
+    # Minimum factor weight to ensure no factor is completely zeroed out
+    MIN_FACTOR_WEIGHT = 0.01  # Minimum 1% contribution for safety
+    
+    # Baseline weight profile (normalized contributions, sum = 1.00)
+    # Major factors: momentum, ema_slope, sequence (~0.30 each)
+    # Minor factors: zscore, hma, tick_imbalance (~0.05-0.08 each)
     PREDICTION_WEIGHTED_FACTORS = {
-        'momentum': 0.15,  # Reduced from 0.16 for tick_imbalance
-        'sequence': 0.11,  # Reduced from 0.12 for tick_imbalance
-        'ema_slope': 0.09,  # Reduced from 0.10 for tick_imbalance
-        'macd': 0.09,  # Reduced from 0.10 for tick_imbalance
-        'stoch': 0.06,  # Reduced from 0.07 for tick_imbalance
-        'adx': 0.06,  # Reduced from 0.07 for tick_imbalance
-        'roc': 0.06,  # Same
-        'velocity': 0.06,  # Same
-        'hh_ll': 0.05,  # Same
-        'bollinger': 0.05,  # Same
-        'zscore': 0.08,  # Mean reversion z-score factor
-        'hma': 0.07,  # Reduced from 0.08 for tick_imbalance
-        'tick_imbalance': 0.07,  # NEW: Tick imbalance ratio for micro-momentum
+        'momentum': 0.30,      # Major factor - trend following
+        'sequence': 0.25,      # Major factor - tick pattern
+        'ema_slope': 0.30,     # Major factor - trend confirmation
+        'macd': 0.00,          # Not used in _predict_single_horizon
+        'stoch': 0.00,         # Not used in _predict_single_horizon
+        'adx': 0.00,           # Not used in _predict_single_horizon
+        'roc': 0.00,           # Not used in _predict_single_horizon
+        'velocity': 0.00,      # Not used in _predict_single_horizon
+        'hh_ll': 0.00,         # Not used in _predict_single_horizon
+        'bollinger': 0.00,     # Not used in _predict_single_horizon
+        'zscore': 0.08,        # Mean reversion factor
+        'hma': 0.04,           # Minor factor - Hull MA direction
+        'tick_imbalance': 0.03,# Minor factor - micro-momentum
     }
+    # Total (used factors) = 0.30 + 0.25 + 0.30 + 0.08 + 0.04 + 0.03 = 1.00
+    
+    # Regime-Specific Weight Profiles v4.3
+    # Each profile is normalized to sum = 1.0 for used factors
+    # IMPORTANT: No factor should be zero - use MIN_FACTOR_WEIGHT as minimum
+    
+    # TRENDING: Boost momentum/trend-following factors, reduce mean reversion
+    WEIGHT_PROFILE_TRENDING = {
+        'momentum': 0.35,      # +17% boost vs baseline 0.30
+        'sequence': 0.25,      # Same as baseline
+        'ema_slope': 0.35,     # +17% boost vs baseline 0.30
+        'macd': 0.00,          # Not used in _predict_single_horizon
+        'stoch': 0.00,         # Not used in _predict_single_horizon
+        'adx': 0.00,           # Not used in _predict_single_horizon
+        'roc': 0.00,           # Not used in _predict_single_horizon
+        'velocity': 0.00,      # Not used in _predict_single_horizon
+        'hh_ll': 0.00,         # Not used in _predict_single_horizon
+        'bollinger': 0.00,     # Not used in _predict_single_horizon
+        'zscore': 0.02,        # -75% (minimal, not zero for safety)
+        'hma': 0.02,           # -50% (minimal, not zero for safety)
+        'tick_imbalance': 0.01,# -67% (minimal, not zero for safety)
+    }
+    # Total (used factors) = 0.35 + 0.25 + 0.35 + 0.02 + 0.02 + 0.01 = 1.00
+    
+    # RANGING: Boost mean reversion factors, reduce momentum
+    WEIGHT_PROFILE_RANGING = {
+        'momentum': 0.18,      # -40% vs baseline 0.30
+        'sequence': 0.14,      # -44% vs baseline 0.25
+        'ema_slope': 0.18,     # -40% vs baseline 0.30
+        'macd': 0.00,          # Not used in _predict_single_horizon
+        'stoch': 0.00,         # Not used in _predict_single_horizon
+        'adx': 0.00,           # Not used in _predict_single_horizon
+        'roc': 0.00,           # Not used in _predict_single_horizon
+        'velocity': 0.00,      # Not used in _predict_single_horizon
+        'hh_ll': 0.00,         # Not used in _predict_single_horizon
+        'bollinger': 0.00,     # Not used in _predict_single_horizon
+        'zscore': 0.35,        # +338% (main factor for mean reversion)
+        'hma': 0.08,           # +100% (support mean reversion)
+        'tick_imbalance': 0.07,# +133% (support mean reversion)
+    }
+    # Total (used factors) = 0.18 + 0.14 + 0.18 + 0.35 + 0.08 + 0.07 = 1.00
+    # Note: TRANSITIONAL uses baseline PREDICTION_WEIGHTED_FACTORS
     
     # Multi-Horizon Prediction v4.0 - Consensus-based direction prediction
     MULTI_HORIZON_LEVELS = [1, 3, 5]  # Predict 1, 3, 5 ticks ahead
@@ -299,6 +348,14 @@ class TradingStrategy:
     
     HMA_PERIOD = 16  # Hull Moving Average period
     TICK_IMBALANCE_LOOKBACK = 20  # Number of ticks to analyze for tick imbalance
+    
+    # Regime Detection v4.2 - Market regime detection for adaptive strategy
+    REGIME_ADX_TRENDING_THRESHOLD = 22  # ADX >= 22 = TRENDING market
+    REGIME_ADX_RANGING_THRESHOLD = 12   # ADX < 12 = RANGING market
+    REGIME_VOLATILITY_LOOKBACK = 20     # Ticks untuk volatility calculation
+    REGIME_TRENDING_MOMENTUM_BOOST = 1.3  # 30% boost untuk trend-following di trending market
+    REGIME_RANGING_ZSCORE_BOOST = 1.5     # 50% boost untuk mean reversion di ranging market
+    REGIME_DI_DOMINANCE_THRESHOLD = 10    # Min DI diff for clear trend dominance
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -323,6 +380,9 @@ class TradingStrategy:
         self._macd_signal_cache: Optional[float] = None
         self._macd_values_cache: List[float] = []
         self._last_tick_count_for_ema: int = 0
+        
+        # Regime Detection v4.2 - Track previous regime for change logging
+        self._previous_regime: Optional[str] = None
         
     def add_tick(self, price: float) -> None:
         """
@@ -437,6 +497,7 @@ class TradingStrategy:
         self._macd_signal_cache = None
         self._macd_values_cache.clear()
         self._last_tick_count_for_ema = 0
+        self._previous_regime = None
         
     def calculate_ema(self, prices: List[float], period: int) -> float:
         """
@@ -695,6 +756,136 @@ class TradingStrategy:
             confidence = 0.0
         
         return direction, round(confidence, 3), details
+    
+    def detect_market_regime(self) -> Tuple[str, float, Dict[str, Any]]:
+        """
+        Detect market regime: TRENDING, RANGING, or TRANSITIONAL.
+        
+        Uses ADX for trend strength and volatility (ATR) for choppiness detection.
+        
+        TRENDING (ADX >= 22 with clear DI dominance):
+        - Favor trend-following strategies (momentum, EMA, sequence)
+        - Strong directional movement expected
+        
+        RANGING (ADX < 12 or choppy price action):
+        - Favor mean reversion strategies (Z-Score)
+        - Price expected to revert to mean
+        
+        TRANSITIONAL (12 <= ADX < 22):
+        - Mixed signals, use balanced approach
+        
+        Returns:
+            Tuple of (regime, confidence, details)
+            - regime: "TRENDING", "RANGING", or "TRANSITIONAL"
+            - confidence: 0.0 to 1.0 (how confident about regime)
+            - details: Dict with ADX, DI values, volatility info
+        """
+        details = {
+            'adx': 0.0,
+            'plus_di': 0.0,
+            'minus_di': 0.0,
+            'di_diff': 0.0,
+            'volatility_pct': 0.0,
+            'trend_direction': 'NEUTRAL'
+        }
+        
+        min_required = self.ADX_PERIOD + 5
+        if len(self.tick_history) < min_required:
+            return "TRANSITIONAL", 0.0, details
+        
+        adx, plus_di, minus_di = self.calculate_adx(
+            self.tick_history, self.high_history, self.low_history, self.ADX_PERIOD
+        )
+        
+        details['adx'] = safe_float(adx, 0.0)
+        details['plus_di'] = safe_float(plus_di, 0.0)
+        details['minus_di'] = safe_float(minus_di, 0.0)
+        di_diff = abs(plus_di - minus_di)
+        details['di_diff'] = round(di_diff, 2)
+        
+        if plus_di > minus_di:
+            details['trend_direction'] = 'BULLISH'
+        elif minus_di > plus_di:
+            details['trend_direction'] = 'BEARISH'
+        else:
+            details['trend_direction'] = 'NEUTRAL'
+        
+        lookback = min(self.REGIME_VOLATILITY_LOOKBACK, len(self.tick_history))
+        if lookback >= 2:
+            recent_prices = self.tick_history[-lookback:]
+            price_changes = [abs(recent_prices[i] - recent_prices[i-1]) for i in range(1, len(recent_prices))]
+            avg_change = safe_divide(sum(price_changes), len(price_changes), 0.0)
+            avg_price = safe_divide(sum(recent_prices), len(recent_prices), 1.0)
+            volatility_pct = safe_divide(avg_change * 100, avg_price, 0.0)
+            details['volatility_pct'] = round(volatility_pct, 4)
+        else:
+            volatility_pct = 0.0
+        
+        regime = "TRANSITIONAL"
+        confidence = 0.0
+        
+        if adx >= self.REGIME_ADX_TRENDING_THRESHOLD and di_diff >= self.REGIME_DI_DOMINANCE_THRESHOLD:
+            regime = "TRENDING"
+            adx_excess = (adx - self.REGIME_ADX_TRENDING_THRESHOLD) / 10.0
+            di_strength = min(1.0, di_diff / 20.0)
+            confidence = min(1.0, 0.5 + adx_excess * 0.25 + di_strength * 0.25)
+        elif adx < self.REGIME_ADX_RANGING_THRESHOLD:
+            regime = "RANGING"
+            adx_deficit = (self.REGIME_ADX_RANGING_THRESHOLD - adx) / self.REGIME_ADX_RANGING_THRESHOLD
+            confidence = min(1.0, 0.4 + adx_deficit * 0.4)
+        elif volatility_pct < 0.01 and adx < 18:
+            regime = "RANGING"
+            confidence = 0.5
+        else:
+            regime = "TRANSITIONAL"
+            confidence = 0.3
+        
+        if self._previous_regime is not None and self._previous_regime != regime:
+            logger.info(f"📊 Regime change: {self._previous_regime} → {regime} (ADX={adx:.1f}, DI diff={di_diff:.1f}, conf={confidence:.0%})")
+        
+        self._previous_regime = regime
+        
+        return regime, round(confidence, 3), details
+    
+    def get_regime_weights(self, regime: str, regime_conf: float) -> Dict[str, float]:
+        """
+        Get weight profile based on detected regime.
+        
+        For high confidence regimes, use dedicated profiles.
+        For low confidence or transitional, blend toward baseline.
+        
+        IMPORTANT: Enforces MIN_FACTOR_WEIGHT to prevent any factor from being
+        completely zeroed out, maintaining safety checks across all regimes.
+        
+        Args:
+            regime: "TRENDING", "RANGING", or "TRANSITIONAL"
+            regime_conf: Confidence 0.0 to 1.0
+            
+        Returns:
+            Dict of factor weights (normalized to ~1.0)
+        """
+        baseline = self.PREDICTION_WEIGHTED_FACTORS
+        
+        if regime == "TRANSITIONAL" or regime_conf < 0.5:
+            return baseline.copy()
+        
+        if regime == "TRENDING":
+            target = self.WEIGHT_PROFILE_TRENDING
+        elif regime == "RANGING":
+            target = self.WEIGHT_PROFILE_RANGING
+        else:
+            return baseline.copy()
+        
+        blend_factor = (regime_conf - 0.5) * 2
+        
+        blended = {}
+        for key in baseline:
+            base_w = baseline.get(key, 0.0)
+            target_w = target.get(key, 0.0)
+            raw_weight = base_w + (target_w - base_w) * blend_factor
+            blended[key] = max(self.MIN_FACTOR_WEIGHT, raw_weight)
+        
+        return blended
     
     def calculate_macd_incremental(self) -> Tuple[float, float, float]:
         """
@@ -1968,8 +2159,16 @@ class TradingStrategy:
         if len(self.tick_history) < min_ticks_needed:
             return "NEUTRAL", 0.0, details
         
+        regime, regime_conf, regime_details = self.detect_market_regime()
+        weights = self.get_regime_weights(regime, regime_conf)
+        details['regime'] = regime
+        details['regime_confidence'] = regime_conf
+        details['weight_profile'] = 'TRENDING' if regime == 'TRENDING' and regime_conf >= 0.5 else ('RANGING' if regime == 'RANGING' and regime_conf >= 0.5 else 'BASELINE')
+        
         up_score = 0.0
         down_score = 0.0
+        
+        momentum_weight = weights.get('momentum', 0.30)
         
         lookback = min(horizon * 3, len(self.tick_history) - 1, 20)
         if lookback >= 2:
@@ -1984,14 +2183,16 @@ class TradingStrategy:
                     momentum_threshold = 0.01 * horizon
                     if momentum_pct > momentum_threshold:
                         momentum_strength = min(1.0, abs(momentum_pct) / (momentum_threshold * 3) + 0.3)
-                        up_score += 0.35 * momentum_strength
+                        up_score += momentum_weight * momentum_strength
                         details['momentum_score'] = momentum_strength
                         details['factors'].append(f"Mom+{momentum_pct:.3f}%")
                     elif momentum_pct < -momentum_threshold:
                         momentum_strength = min(1.0, abs(momentum_pct) / (momentum_threshold * 3) + 0.3)
-                        down_score += 0.35 * momentum_strength
+                        down_score += momentum_weight * momentum_strength
                         details['momentum_score'] = -momentum_strength
                         details['factors'].append(f"Mom{momentum_pct:.3f}%")
+        
+        ema_weight = weights.get('ema_slope', 0.30)
         
         ema_lookback = min(horizon + 3, len(self.tick_history) - 1, 10)
         if ema_lookback >= 3:
@@ -2010,14 +2211,16 @@ class TradingStrategy:
                     slope_threshold = 0.005 * horizon
                     if slope_pct > slope_threshold:
                         slope_strength = min(1.0, abs(slope_pct) / (slope_threshold * 4) + 0.2)
-                        up_score += 0.35 * slope_strength
+                        up_score += ema_weight * slope_strength
                         details['ema_slope_score'] = slope_strength
                         details['factors'].append(f"EMA+{slope_pct:.4f}%")
                     elif slope_pct < -slope_threshold:
                         slope_strength = min(1.0, abs(slope_pct) / (slope_threshold * 4) + 0.2)
-                        down_score += 0.35 * slope_strength
+                        down_score += ema_weight * slope_strength
                         details['ema_slope_score'] = -slope_strength
                         details['factors'].append(f"EMA{slope_pct:.4f}%")
+        
+        seq_weight = weights.get('sequence', 0.25)
         
         seq_lookback = min(horizon + 2, len(self.tick_history) - 1, 8)
         if seq_lookback >= 2:
@@ -2044,20 +2247,20 @@ class TradingStrategy:
             
             if consecutive_up >= min_consecutive:
                 seq_strength = min(1.0, consecutive_up / (min_consecutive + 2))
-                up_score += 0.30 * seq_strength
+                up_score += seq_weight * seq_strength
                 details['sequence_score'] = seq_strength
                 details['factors'].append(f"Seq↑{consecutive_up}")
             elif consecutive_down >= min_consecutive:
                 seq_strength = min(1.0, consecutive_down / (min_consecutive + 2))
-                down_score += 0.30 * seq_strength
+                down_score += seq_weight * seq_strength
                 details['sequence_score'] = -seq_strength
                 details['factors'].append(f"Seq↓{consecutive_down}")
         
-        # Mean Reversion Z-Score Factor (weight 0.30, same scale as other factors)
+        zscore_weight = weights.get('zscore', 0.08)
+        
         zscore_dir, zscore_conf, zscore_details = self.calculate_zscore_mean_reversion()
-        if zscore_details.get('threshold_reached', False):
-            # Use 0.30 weight consistent with sequence factor, confidence already 0-1
-            zscore_contribution = 0.30 * zscore_conf
+        if zscore_details.get('threshold_reached', False) and zscore_weight > 0:
+            zscore_contribution = zscore_weight * zscore_conf
             if zscore_dir == "UP":
                 up_score += zscore_contribution
                 details['factors'].append(f"ZS↑{zscore_details['zscore']:.2f}")
@@ -2065,10 +2268,11 @@ class TradingStrategy:
                 down_score += zscore_contribution
                 details['factors'].append(f"ZS↓{zscore_details['zscore']:.2f}")
         
-        # HMA Direction Factor (weight 0.07, matching PREDICTION_WEIGHTED_FACTORS['hma'])
+        hma_weight = weights.get('hma', 0.04)
+        
         hma_dir, hma_conf, hma_details = self.calculate_hma_direction(self.HMA_PERIOD, lookback=horizon + 2)
-        if hma_dir != "NEUTRAL" and hma_conf > 0.3:
-            hma_contribution = 0.07 * hma_conf
+        if hma_dir != "NEUTRAL" and hma_conf > 0.3 and hma_weight > 0:
+            hma_contribution = hma_weight * hma_conf
             if hma_dir == "UP":
                 up_score += hma_contribution
                 details['factors'].append(f"HMA↑{hma_details['slope']:.3f}%")
@@ -2076,17 +2280,20 @@ class TradingStrategy:
                 down_score += hma_contribution
                 details['factors'].append(f"HMA↓{hma_details['slope']:.3f}%")
         
-        # Tick Imbalance Factor (weight 0.07, matching PREDICTION_WEIGHTED_FACTORS['tick_imbalance'])
+        tick_imb_weight = weights.get('tick_imbalance', 0.03)
+        
         tick_imb_lookback = max(self.TICK_IMBALANCE_LOOKBACK, horizon * 4)
         tick_imb_dir, tick_imb_conf, tick_imb_details = self.calculate_tick_imbalance(tick_imb_lookback)
-        if tick_imb_dir != "NEUTRAL" and tick_imb_conf > 0.3:
-            tick_imb_contribution = 0.07 * tick_imb_conf
+        if tick_imb_dir != "NEUTRAL" and tick_imb_conf > 0.3 and tick_imb_weight > 0:
+            tick_imb_contribution = tick_imb_weight * tick_imb_conf
             if tick_imb_dir == "UP":
                 up_score += tick_imb_contribution
                 details['factors'].append(f"TI↑{tick_imb_details['up_ratio']:.2f}")
             elif tick_imb_dir == "DOWN":
                 down_score += tick_imb_contribution
                 details['factors'].append(f"TI↓{tick_imb_details['up_ratio']:.2f}")
+        
+        details['factors'].append(f"RGM:{regime}({regime_conf:.0%})")
         
         if up_score > down_score and up_score > 0.15:
             direction = "UP"
