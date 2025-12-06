@@ -72,6 +72,14 @@ Do not make changes to the file `Y`.
     - **O(1) Indicator Calculation**: `calculate_ema_incremental()` dan `calculate_macd_incremental()` dengan caching (sebelumnya O(n²))
     - **PairScanner Pruning**: `_prune_old_data()` untuk cleanup strategy data setiap 10000 ticks per symbol
     - **SESSION_SECRET Persistence**: Session key disimpan ke file `.session_secret` jika tidak ada di environment (dilindungi .gitignore)
+- **Telegram WebApp Dashboard Integration (v3.1)**:
+    - **Auto-Authentication**: Ketika user membuka dashboard dari Telegram WebApp, otomatis login menggunakan Telegram ID (tidak perlu input token manual)
+    - **HMAC-SHA256 Validation**: initData dari Telegram divalidasi menggunakan HMAC-SHA256 dengan bot token untuk keamanan
+    - **Auth Date Expiry**: initData hanya valid 5 menit untuk mencegah replay attack
+    - **Per-User Token**: Setiap user mendapat token unik berdasarkan Telegram ID
+    - **Welcome Message**: Dashboard menampilkan "Welcome, {first_name}!" untuk user yang login via Telegram
+    - **Fallback Manual Token**: Jika tidak dari Telegram WebApp, user masih bisa login dengan token manual
+    - **Sinkronisasi Bot & Dashboard**: Dashboard tersinkron dengan bot - user yang sama di Telegram dan dashboard
 
 ### Feature Specifications
 - **Supported Symbols**: Volatility indices (R_100, R_75, R_50, R_25, R_10, 1HZ100V, 1HZ75V, 1HZ50V) for 5-10 ticks duration, and frxXAUUSD (Gold/USD) for daily duration.
