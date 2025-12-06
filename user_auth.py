@@ -53,6 +53,7 @@ class UserSession:
     last_used: str
     login_attempts: int = 0
     lockout_until: float = 0.0
+    language_code: str = "id"
 
 
 class UserAuthManager:
@@ -359,6 +360,23 @@ class UserAuthManager:
         if user_id in self.pending_logins:
             del self.pending_logins[user_id]
             logger.info(f"🚫 Login cancelled for user {user_id}")
+
+    def get_user_language(self, user_id: int) -> str:
+        """Get user's language preference"""
+        session = self.sessions.get(user_id)
+        if session:
+            return session.language_code
+        return "id"
+
+    def set_user_language(self, user_id: int, language_code: str) -> bool:
+        """Set user's language preference and persist it"""
+        session = self.sessions.get(user_id)
+        if not session:
+            return False
+        session.language_code = language_code
+        self._save_sessions()
+        logger.info(f"🌐 Language set for user {user_id}: {language_code}")
+        return True
 
 
 auth_manager = UserAuthManager()

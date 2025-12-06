@@ -53,6 +53,7 @@ from symbols import (
 )
 from user_auth import auth_manager, UserAuthManager, ensure_authenticated, ALLOWED_CALLBACKS_WITHOUT_AUTH
 from event_bus import get_event_bus
+from i18n import get_text, t, detect_language, get_user_language, set_user_language
 
 USD_TO_IDR = 15800
 CHAT_ID_FILE = "logs/active_chat_id.txt"
@@ -403,6 +404,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    lang = get_user_language(user_id, update.effective_user.language_code)
     
     with _chat_id_lock:
         active_chat_id = chat_id
@@ -423,7 +425,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if needs_connect:
             await update.message.reply_text(
-                "🔄 Menghubungkan ke Deriv...\n\nMohon tunggu sebentar.",
+                get_text("connecting_deriv", lang),
                 parse_mode="Markdown"
             )
             
@@ -431,8 +433,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not success:
                 await update.message.reply_text(
-                    f"❌ **Gagal koneksi ke Deriv**\n\n{msg}\n\n"
-                    "Coba /login untuk login ulang dengan token baru.",
+                    get_text("connection_failed", lang, error_msg=msg),
                     parse_mode="Markdown"
                 )
                 return
@@ -440,49 +441,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         account_type = user_info['account_type'].upper() if user_info else "UNKNOWN"
         account_emoji = "🎮" if account_type == "DEMO" else "💵"
         
-        welcome_text = (
-            f"🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
-            f"Selamat datang kembali! {account_emoji}\n"
-            f"Akun: **{account_type}**\n\n"
-            f"📊 **Indicators:** RSI, EMA, MACD, Stochastic, ATR\n\n"
-            f"📋 **Menu Utama:**\n"
-            f"• /akun - Kelola akun (saldo, switch demo/real)\n"
-            f"• /autotrade - Mulai auto trading\n"
-            f"• /stop - Hentikan trading\n"
-            f"• /status - Cek status bot\n"
-            f"• /help - Panduan lengkap\n\n"
-            f"⚠️ *Trading memiliki risiko. Gunakan dengan bijak.*"
-        )
+        welcome_text = get_text("welcome_logged_in", lang, 
+                                account_emoji=account_emoji, 
+                                account_type=account_type)
         
         keyboard = [
             [
-                InlineKeyboardButton("💰 Cek Akun", callback_data="menu_akun"),
-                InlineKeyboardButton("🚀 Auto Trade", callback_data="menu_autotrade")
+                InlineKeyboardButton(get_text("btn_check_account", lang), callback_data="menu_akun"),
+                InlineKeyboardButton(get_text("btn_auto_trade", lang), callback_data="menu_autotrade")
             ],
             [
-                InlineKeyboardButton("📊 Status", callback_data="menu_status"),
-                InlineKeyboardButton("❓ Help", callback_data="menu_help")
+                InlineKeyboardButton(get_text("btn_status", lang), callback_data="menu_status"),
+                InlineKeyboardButton(get_text("btn_help", lang), callback_data="menu_help")
             ],
-            [InlineKeyboardButton("👋 Logout", callback_data="confirm_logout")]
+            [InlineKeyboardButton(get_text("btn_logout", lang), callback_data="confirm_logout")]
         ]
     else:
-        welcome_text = (
-            "🤖 **DERIV AUTO TRADING BOT v2.0**\n\n"
-            "Selamat datang! Bot ini adalah bot trading otomatis\n"
-            "untuk Binary Options (Volatility Index).\n\n"
-            "🔐 **Anda belum login**\n\n"
-            "Untuk menggunakan bot ini, Anda harus login terlebih dahulu\n"
-            "dengan token API Deriv Anda.\n\n"
-            "📍 **Cara Login:**\n"
-            "1. Klik tombol LOGIN di bawah\n"
-            "2. Pilih tipe akun (Demo/Real)\n"
-            "3. Kirim token API Deriv Anda\n\n"
-            "⚠️ *Token Anda akan dienkripsi dan disimpan dengan aman.*"
-        )
+        welcome_text = get_text("welcome_not_logged_in", lang)
         
         keyboard = [
-            [InlineKeyboardButton("🔐 LOGIN", callback_data="start_login")],
-            [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
+            [InlineKeyboardButton(get_text("btn_login", lang), callback_data="start_login")],
+            [InlineKeyboardButton(get_text("btn_help", lang), callback_data="menu_help")]
         ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -501,17 +480,18 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    lang = get_user_language(user_id, update.effective_user.language_code)
+    
     if not auth_manager.is_authenticated(user_id):
         await update.message.reply_text(
-            "🔒 **AKSES DITOLAK**\n\n"
-            "Anda belum login. Gunakan /login terlebih dahulu.",
+            get_text("access_denied", lang),
             parse_mode="Markdown"
         )
         return
     
     if not deriv_ws or not deriv_ws.is_ready():
         await update.message.reply_text(
-            "❌ WebSocket belum terkoneksi. Tunggu beberapa detik..."
+            get_text("ws_not_connected", lang)
         )
         return
         
@@ -520,23 +500,24 @@ async def akun_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if account_info:
         balance_idr = account_info.balance * USD_TO_IDR
-        account_text = (
-            f"💼 **INFORMASI AKUN**\n\n"
-            f"• Tipe: {account_type} {'🎮' if account_info.is_virtual else '💵'}\n"
-            f"• ID: `{account_info.account_id}`\n"
-            f"• Saldo: **${account_info.balance:.2f}** {account_info.currency}\n"
-            f"• Saldo IDR: **Rp {balance_idr:,.0f}**\n"
-        )
+        account_emoji = '🎮' if account_info.is_virtual else '💵'
+        account_text = get_text("account_info", lang,
+                                account_type=account_type,
+                                account_emoji=account_emoji,
+                                account_id=account_info.account_id,
+                                balance=account_info.balance,
+                                currency=account_info.currency,
+                                balance_idr=balance_idr)
     else:
-        account_text = "❌ Gagal mendapatkan info akun."
+        account_text = get_text("account_info_failed", lang)
         
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh Saldo", callback_data="akun_refresh")],
+        [InlineKeyboardButton(get_text("btn_refresh_balance", lang), callback_data="akun_refresh")],
         [
-            InlineKeyboardButton("🎮 Switch ke DEMO", callback_data="akun_demo"),
-            InlineKeyboardButton("💵 Switch ke REAL", callback_data="akun_real")
+            InlineKeyboardButton(get_text("btn_switch_demo", lang), callback_data="akun_demo"),
+            InlineKeyboardButton(get_text("btn_switch_real", lang), callback_data="akun_real")
         ],
-        [InlineKeyboardButton("🔌 Reset Koneksi", callback_data="akun_reset")]
+        [InlineKeyboardButton(get_text("btn_reset_connection", lang), callback_data="akun_reset")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -554,16 +535,17 @@ async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    lang = get_user_language(user_id, update.effective_user.language_code)
+    
     if not auth_manager.is_authenticated(user_id):
         await update.message.reply_text(
-            "🔒 **AKSES DITOLAK**\n\n"
-            "Anda belum login. Gunakan /login terlebih dahulu.",
+            get_text("access_denied", lang),
             parse_mode="Markdown"
         )
         return
     
     if not trading_manager:
-        await update.message.reply_text("❌ Trading manager belum siap.")
+        await update.message.reply_text(get_text("trading_manager_not_ready", lang))
         return
         
     args = context.args if context.args else []
@@ -633,16 +615,17 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    lang = get_user_language(user_id, update.effective_user.language_code)
+    
     if not auth_manager.is_authenticated(user_id):
         await update.message.reply_text(
-            "🔒 **AKSES DITOLAK**\n\n"
-            "Anda belum login. Gunakan /login terlebih dahulu.",
+            get_text("access_denied", lang),
             parse_mode="Markdown"
         )
         return
     
     if not trading_manager:
-        await update.message.reply_text("❌ Trading manager belum siap.")
+        await update.message.reply_text(get_text("trading_manager_not_ready", lang))
         return
         
     result = trading_manager.stop()
