@@ -190,12 +190,12 @@ class TradingStrategy:
     """
     
     RSI_PERIOD = 14
-    RSI_OVERSOLD = 30
-    RSI_OVERBOUGHT = 70
-    RSI_BUY_ENTRY_MIN = 25
-    RSI_BUY_ENTRY_MAX = 30
-    RSI_SELL_ENTRY_MIN = 70
-    RSI_SELL_ENTRY_MAX = 75
+    RSI_OVERSOLD = 28  # Tightened from 30 - require more extreme oversold
+    RSI_OVERBOUGHT = 72  # Tightened from 70 - require more extreme overbought
+    RSI_BUY_ENTRY_MIN = 18  # Tightened from 25 - only enter at extreme levels
+    RSI_BUY_ENTRY_MAX = 28  # Tightened from 30
+    RSI_SELL_ENTRY_MIN = 72  # Tightened from 70
+    RSI_SELL_ENTRY_MAX = 82  # Tightened from 75 - only enter at extreme levels
     
     EMA_FAST_PERIOD = 9
     EMA_SLOW_PERIOD = 21
@@ -206,33 +206,33 @@ class TradingStrategy:
     
     STOCH_PERIOD = 14
     STOCH_SMOOTH = 3
-    STOCH_OVERSOLD = 20
-    STOCH_OVERBOUGHT = 80
+    STOCH_OVERSOLD = 15  # Tightened from 20 - require more extreme
+    STOCH_OVERBOUGHT = 85  # Tightened from 80 - require more extreme
     
     ATR_PERIOD = 14
     ATR_TP_MULTIPLIER = 2.5
     ATR_SL_MULTIPLIER = 1.5
     
     ADX_PERIOD = 14
-    ADX_STRONG_TREND = 25
-    ADX_WEAK_TREND = 20
-    ADX_NO_TREND = 15
+    ADX_STRONG_TREND = 23  # Lowered from 25 - catch valid trends earlier
+    ADX_WEAK_TREND = 18  # Lowered from 20
+    ADX_NO_TREND = 18  # Raised from 15 - block more sideways markets
     
     TREND_TICKS = 3
     MIN_TICK_HISTORY = 30
     MIN_VOLATILITY = 0.05
     
-    MIN_CONFIDENCE_THRESHOLD = 0.5
+    MIN_CONFIDENCE_THRESHOLD = 0.62  # Raised from 0.5 - require higher confidence
     
     MAX_TICK_HISTORY = 200
     MEMORY_CLEANUP_INTERVAL = 100
     INDICATOR_RESET_THRESHOLD = 500
     RSI_HISTORY_SIZE = 5
     
-    COOLDOWN_SECONDS = 30
+    COOLDOWN_SECONDS = 45  # Increased from 30 - prevent overtrading
     VOLUME_HISTORY_SIZE = 20
     EMA_SLOPE_LOOKBACK = 5
-    MIN_CONFLUENCE_SCORE = 50
+    MIN_CONFLUENCE_SCORE = 58  # Raised from 50 - require stronger confluence
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -1607,7 +1607,18 @@ class TradingStrategy:
         
         adx_tp_multiplier = 1.0
         
+        # CRITICAL: Require EMA alignment with signal direction for better accuracy
+        ema_bullish = indicators.ema_fast > indicators.ema_slow
+        ema_bearish = indicators.ema_fast < indicators.ema_slow
+        
         if buy_score >= self.MIN_CONFIDENCE_THRESHOLD and buy_score > sell_score:
+            # HARD REQUIREMENT: EMA must be bullish for BUY signal
+            if not ema_bullish and indicators.ema_fast > 0 and indicators.ema_slow > 0:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"BUY blocked: EMA trend bearish (EMA9 < EMA21) conflicts with signal"
+                logger.debug(f"⏳ BUY blocked by EMA conflict: EMA9={indicators.ema_fast:.2f} < EMA21={indicators.ema_slow:.2f}")
+                return result
             cooldown_ok, cooldown_reason = self.should_generate_signal("BUY")
             if not cooldown_ok:
                 result.signal = Signal.WAIT
@@ -1661,6 +1672,13 @@ class TradingStrategy:
                 return result
                 
         if sell_score >= self.MIN_CONFIDENCE_THRESHOLD and sell_score > buy_score:
+            # HARD REQUIREMENT: EMA must be bearish for SELL signal
+            if not ema_bearish and indicators.ema_fast > 0 and indicators.ema_slow > 0:
+                result.signal = Signal.WAIT
+                result.confidence = 0.0
+                result.reason = f"SELL blocked: EMA trend bullish (EMA9 > EMA21) conflicts with signal"
+                logger.debug(f"⏳ SELL blocked by EMA conflict: EMA9={indicators.ema_fast:.2f} > EMA21={indicators.ema_slow:.2f}")
+                return result
             cooldown_ok, cooldown_reason = self.should_generate_signal("SELL")
             if not cooldown_ok:
                 result.signal = Signal.WAIT
