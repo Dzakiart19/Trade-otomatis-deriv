@@ -269,17 +269,18 @@ class TradingStrategy:
     PREDICTION_BOLLINGER_PERIOD = 20  # Bollinger Bands period
     PREDICTION_BOLLINGER_STD = 2.0  # Bollinger Bands standard deviation multiplier
     PREDICTION_WEIGHTED_FACTORS = {
-        'momentum': 0.18,  # Reduced from 0.20
-        'sequence': 0.13,  # Reduced from 0.15
-        'ema_slope': 0.11,  # Reduced from 0.12
-        'macd': 0.11,  # Reduced from 0.12
-        'stoch': 0.08,  # Same
-        'adx': 0.08,  # Same
-        'roc': 0.07,  # Reduced from 0.08
-        'velocity': 0.06,  # Reduced from 0.07
+        'momentum': 0.16,  # Reduced from 0.18 for HMA
+        'sequence': 0.12,  # Reduced from 0.13 for HMA
+        'ema_slope': 0.10,  # Reduced from 0.11 for HMA
+        'macd': 0.10,  # Reduced from 0.11 for HMA
+        'stoch': 0.07,  # Reduced from 0.08 for HMA
+        'adx': 0.07,  # Reduced from 0.08 for HMA
+        'roc': 0.06,  # Reduced from 0.07 for HMA
+        'velocity': 0.06,  # Same
         'hh_ll': 0.05,  # Same
         'bollinger': 0.05,  # Same
-        'zscore': 0.08,  # NEW: Mean reversion z-score factor
+        'zscore': 0.08,  # Mean reversion z-score factor
+        'hma': 0.08,  # NEW: Hull Moving Average for smoother trend
     }
     
     # Multi-Horizon Prediction v4.0 - Consensus-based direction prediction
@@ -294,6 +295,8 @@ class TradingStrategy:
     ZSCORE_EXTREME_THRESHOLD = 2.5  # Very extreme = high confidence reversion
     # Note: _predict_single_horizon uses hardcoded 0.30 weight for Z-Score
     ZSCORE_WEIGHT = 0.30  # Updated to match actual usage in _predict_single_horizon
+    
+    HMA_PERIOD = 16  # Hull Moving Average period
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -500,6 +503,121 @@ class TradingStrategy:
             self._ema_slow_cache = ema
         
         return ema
+    
+    def calculate_wma(self, prices: List[float], period: int) -> float:
+        """Calculate Weighted Moving Average.
+        WMA = sum(price[i] * weight[i]) / sum(weights)
+        where weight = period - i (most recent has highest weight)
+        """
+        if len(prices) < period:
+            return safe_divide(sum(prices), len(prices), 0.0) if prices else 0.0
+        
+        recent = prices[-period:]
+        weighted_sum = 0.0
+        weight_total = 0
+        
+        for i, price in enumerate(recent):
+            weight = i + 1  # Weight increases: 1, 2, 3, ..., period
+            weighted_sum += safe_float(price) * weight
+            weight_total += weight
+        
+        return round(safe_divide(weighted_sum, weight_total, 0.0), 5)
+    
+    def calculate_hma(self, prices: List[float], period: int = 16) -> float:
+        """Calculate Hull Moving Average.
+        HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        
+        HMA is smoother than EMA with less lag, ideal for trend detection.
+        """
+        if len(prices) < period:
+            return safe_divide(sum(prices), len(prices), 0.0) if prices else 0.0
+        
+        half_period = max(1, period // 2)
+        sqrt_period = max(1, int(period ** 0.5))
+        
+        min_required = period + sqrt_period
+        if len(prices) < min_required:
+            wma_half = self.calculate_wma(prices, half_period)
+            wma_full = self.calculate_wma(prices, period)
+            return round(2 * wma_half - wma_full, 5)
+        
+        interim_series = []
+        for i in range(sqrt_period):
+            end_idx = len(prices) - sqrt_period + i + 1
+            subset = prices[:end_idx]
+            
+            if len(subset) >= period:
+                wh = self.calculate_wma(subset, half_period)
+                wf = self.calculate_wma(subset, period)
+                interim_series.append(2 * wh - wf)
+        
+        if len(interim_series) >= sqrt_period:
+            hma = self.calculate_wma(interim_series, sqrt_period)
+        else:
+            wma_half = self.calculate_wma(prices, half_period)
+            wma_full = self.calculate_wma(prices, period)
+            hma = 2 * wma_half - wma_full
+        
+        return round(hma, 5)
+    
+    def calculate_hma_direction(self, period: int = 16, lookback: int = 5) -> Tuple[str, float, Dict[str, Any]]:
+        """Calculate HMA trend direction and strength.
+        
+        Returns:
+            Tuple of (direction, confidence, details)
+            - direction: "UP", "DOWN", or "NEUTRAL"
+            - confidence: 0.0 to 1.0
+            - details: Dict with HMA values
+        """
+        details = {
+            'hma_current': 0.0,
+            'hma_prev': 0.0,
+            'slope': 0.0,
+            'price_vs_hma': 'NEUTRAL'
+        }
+        
+        min_required = period + lookback + 5
+        if len(self.tick_history) < min_required:
+            return "NEUTRAL", 0.0, details
+        
+        hma_current = self.calculate_hma(self.tick_history, period)
+        
+        hma_prev = self.calculate_hma(self.tick_history[:-lookback], period)
+        
+        current_price = safe_float(self.tick_history[-1])
+        avg_price = safe_divide(sum(self.tick_history[-period:]), period, current_price)
+        
+        details['hma_current'] = hma_current
+        details['hma_prev'] = hma_prev
+        details['current_price'] = current_price
+        
+        slope_pct = safe_divide((hma_current - hma_prev) * 100, avg_price, 0.0)
+        details['slope'] = round(slope_pct, 4)
+        
+        if current_price > hma_current:
+            details['price_vs_hma'] = 'ABOVE'
+        elif current_price < hma_current:
+            details['price_vs_hma'] = 'BELOW'
+        else:
+            details['price_vs_hma'] = 'AT'
+        
+        slope_threshold = 0.01
+        
+        if slope_pct > slope_threshold:
+            direction = "UP"
+            slope_confidence = min(1.0, abs(slope_pct) / 0.05)
+            price_confirm = 0.2 if details['price_vs_hma'] == 'ABOVE' else 0.0
+            confidence = min(1.0, 0.3 + slope_confidence * 0.5 + price_confirm)
+        elif slope_pct < -slope_threshold:
+            direction = "DOWN"
+            slope_confidence = min(1.0, abs(slope_pct) / 0.05)
+            price_confirm = 0.2 if details['price_vs_hma'] == 'BELOW' else 0.0
+            confidence = min(1.0, 0.3 + slope_confidence * 0.5 + price_confirm)
+        else:
+            direction = "NEUTRAL"
+            confidence = 0.0
+        
+        return direction, round(confidence, 3), details
     
     def calculate_macd_incremental(self) -> Tuple[float, float, float]:
         """
@@ -1869,6 +1987,17 @@ class TradingStrategy:
             elif zscore_dir == "DOWN":
                 down_score += zscore_contribution
                 details['factors'].append(f"ZS↓{zscore_details['zscore']:.2f}")
+        
+        # HMA Direction Factor (weight 0.08, matching PREDICTION_WEIGHTED_FACTORS['hma'])
+        hma_dir, hma_conf, hma_details = self.calculate_hma_direction(self.HMA_PERIOD, lookback=horizon + 2)
+        if hma_dir != "NEUTRAL" and hma_conf > 0.3:
+            hma_contribution = 0.08 * hma_conf
+            if hma_dir == "UP":
+                up_score += hma_contribution
+                details['factors'].append(f"HMA↑{hma_details['slope']:.3f}%")
+            elif hma_dir == "DOWN":
+                down_score += hma_contribution
+                details['factors'].append(f"HMA↓{hma_details['slope']:.3f}%")
         
         if up_score > down_score and up_score > 0.15:
             direction = "UP"
