@@ -269,22 +269,31 @@ class TradingStrategy:
     PREDICTION_BOLLINGER_PERIOD = 20  # Bollinger Bands period
     PREDICTION_BOLLINGER_STD = 2.0  # Bollinger Bands standard deviation multiplier
     PREDICTION_WEIGHTED_FACTORS = {
-        'momentum': 0.20,  # Price acceleration/deceleration
-        'sequence': 0.15,  # Consecutive up/down ticks
-        'ema_slope': 0.12,  # EMA trend direction
-        'macd': 0.12,  # MACD histogram direction
-        'stoch': 0.08,  # Stochastic K/D
-        'adx': 0.08,  # ADX trend strength
-        'roc': 0.08,  # Rate of Change
-        'velocity': 0.07,  # Price velocity and acceleration
-        'hh_ll': 0.05,  # Higher Highs / Lower Lows pattern
-        'bollinger': 0.05,  # Bollinger Band position
+        'momentum': 0.18,  # Reduced from 0.20
+        'sequence': 0.13,  # Reduced from 0.15
+        'ema_slope': 0.11,  # Reduced from 0.12
+        'macd': 0.11,  # Reduced from 0.12
+        'stoch': 0.08,  # Same
+        'adx': 0.08,  # Same
+        'roc': 0.07,  # Reduced from 0.08
+        'velocity': 0.06,  # Reduced from 0.07
+        'hh_ll': 0.05,  # Same
+        'bollinger': 0.05,  # Same
+        'zscore': 0.08,  # NEW: Mean reversion z-score factor
     }
     
     # Multi-Horizon Prediction v4.0 - Consensus-based direction prediction
     MULTI_HORIZON_LEVELS = [1, 3, 5]  # Predict 1, 3, 5 ticks ahead
     MULTI_HORIZON_MIN_AGREEMENT = 2  # Minimum horizons that must agree
     MULTI_HORIZON_FULL_AGREEMENT_BOOST = 0.15  # Confidence boost when all horizons agree
+    
+    # Mean Reversion Detection v4.1 - Z-Score based reversion prediction
+    ZSCORE_LOOKBACK = 30  # Ticks to calculate rolling mean/std
+    ZSCORE_HIGH_THRESHOLD = 2.0  # Z-score above this = expect reversion DOWN
+    ZSCORE_LOW_THRESHOLD = -2.0  # Z-score below this = expect reversion UP
+    ZSCORE_EXTREME_THRESHOLD = 2.5  # Very extreme = high confidence reversion
+    # Note: _predict_single_horizon uses hardcoded 0.30 weight for Z-Score
+    ZSCORE_WEIGHT = 0.30  # Updated to match actual usage in _predict_single_horizon
     
     def __init__(self):
         """Inisialisasi strategy dengan tick history kosong"""
@@ -1656,6 +1665,84 @@ class TradingStrategy:
         
         return position, round(min(1.0, strength), 2)
     
+    def calculate_zscore_mean_reversion(self) -> Tuple[str, float, Dict[str, Any]]:
+        """
+        Calculate Z-Score based mean reversion prediction.
+        
+        For synthetic indices, prices often revert to the mean. This method:
+        1. Calculates rolling mean and standard deviation
+        2. Computes Z-score of current price
+        3. Predicts reversion direction with confidence
+        
+        Z-Score = (current_price - mean) / std_dev
+        - Z > 2.0: Price far above mean → expect DOWN reversion
+        - Z < -2.0: Price far below mean → expect UP reversion
+        
+        Returns:
+            Tuple of (direction, confidence, details)
+            - direction: "UP" (revert up), "DOWN" (revert down), or "NEUTRAL"
+            - confidence: 0.0 to 1.0
+            - details: Dict with zscore, mean, std values
+        """
+        details = {
+            'zscore': 0.0,
+            'mean': 0.0,
+            'std': 0.0,
+            'current_price': 0.0,
+            'threshold_reached': False
+        }
+        
+        if len(self.tick_history) < self.ZSCORE_LOOKBACK:
+            return "NEUTRAL", 0.0, details
+        
+        recent = self.tick_history[-self.ZSCORE_LOOKBACK:]
+        current_price = safe_float(self.tick_history[-1])
+        
+        mean = safe_divide(sum(recent), len(recent), current_price)
+        variance = safe_divide(sum((p - mean) ** 2 for p in recent), len(recent), 0.0)
+        std = variance ** 0.5
+        
+        details['mean'] = round(mean, 5)
+        details['std'] = round(std, 5)
+        details['current_price'] = current_price
+        
+        if std <= 0:
+            return "NEUTRAL", 0.0, details
+        
+        zscore = safe_divide((current_price - mean), std, 0.0)
+        details['zscore'] = round(zscore, 3)
+        
+        if zscore >= self.ZSCORE_EXTREME_THRESHOLD:
+            direction = "DOWN"
+            confidence = min(1.0, 0.7 + (zscore - self.ZSCORE_EXTREME_THRESHOLD) * 0.1)
+            details['threshold_reached'] = True
+            logger.debug(f"📊 Z-Score EXTREME HIGH {zscore:.2f} → expect DOWN reversion (conf={confidence:.2f})")
+            
+        elif zscore >= self.ZSCORE_HIGH_THRESHOLD:
+            direction = "DOWN"
+            confidence = 0.4 + (zscore - self.ZSCORE_HIGH_THRESHOLD) * 0.3 / (self.ZSCORE_EXTREME_THRESHOLD - self.ZSCORE_HIGH_THRESHOLD)
+            details['threshold_reached'] = True
+            logger.debug(f"📊 Z-Score HIGH {zscore:.2f} → expect DOWN reversion (conf={confidence:.2f})")
+            
+        elif zscore <= -self.ZSCORE_EXTREME_THRESHOLD:
+            direction = "UP"
+            confidence = min(1.0, 0.7 + (abs(zscore) - self.ZSCORE_EXTREME_THRESHOLD) * 0.1)
+            details['threshold_reached'] = True
+            logger.debug(f"📊 Z-Score EXTREME LOW {zscore:.2f} → expect UP reversion (conf={confidence:.2f})")
+            
+        elif zscore <= self.ZSCORE_LOW_THRESHOLD:
+            direction = "UP"
+            confidence = 0.4 + (abs(zscore) - abs(self.ZSCORE_LOW_THRESHOLD)) * 0.3 / (self.ZSCORE_EXTREME_THRESHOLD - abs(self.ZSCORE_LOW_THRESHOLD))
+            details['threshold_reached'] = True
+            logger.debug(f"📊 Z-Score LOW {zscore:.2f} → expect UP reversion (conf={confidence:.2f})")
+            
+        else:
+            direction = "NEUTRAL"
+            confidence = 0.0
+            details['threshold_reached'] = False
+        
+        return direction, round(confidence, 3), details
+    
     def _predict_single_horizon(self, horizon: int) -> Tuple[str, float, Dict[str, Any]]:
         """
         Predict tick direction for a single horizon using fast, simple calculations.
@@ -1770,6 +1857,18 @@ class TradingStrategy:
                 down_score += 0.30 * seq_strength
                 details['sequence_score'] = -seq_strength
                 details['factors'].append(f"Seq↓{consecutive_down}")
+        
+        # Mean Reversion Z-Score Factor (weight 0.30, same scale as other factors)
+        zscore_dir, zscore_conf, zscore_details = self.calculate_zscore_mean_reversion()
+        if zscore_details.get('threshold_reached', False):
+            # Use 0.30 weight consistent with sequence factor, confidence already 0-1
+            zscore_contribution = 0.30 * zscore_conf
+            if zscore_dir == "UP":
+                up_score += zscore_contribution
+                details['factors'].append(f"ZS↑{zscore_details['zscore']:.2f}")
+            elif zscore_dir == "DOWN":
+                down_score += zscore_contribution
+                details['factors'].append(f"ZS↓{zscore_details['zscore']:.2f}")
         
         if up_score > down_score and up_score > 0.15:
             direction = "UP"
