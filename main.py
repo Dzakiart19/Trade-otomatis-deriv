@@ -2196,6 +2196,37 @@ def main():
             import traceback
             logger.error(traceback.format_exc())
     
+    async def self_ping_keepalive():
+        """
+        Self-ping mechanism untuk menjaga app tetap aktif di Koyeb free tier.
+        Ping /health endpoint setiap 4 menit untuk mencegah Scale-to-Zero.
+        """
+        import aiohttp
+        
+        port = int(os.environ.get("PORT", "8000"))
+        health_url = f"http://127.0.0.1:{port}/health"
+        ping_interval = 240  # 4 menit (Koyeb sleep setelah 5 menit)
+        
+        logger.info(f"🏃 Self-ping keepalive started (interval: {ping_interval}s)")
+        
+        await asyncio.sleep(10)  # Tunggu web server siap
+        
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            logger.debug(f"🏓 Self-ping OK: {health_url}")
+                        else:
+                            logger.warning(f"⚠️ Self-ping response: {resp.status}")
+            except asyncio.CancelledError:
+                logger.info("🛑 Self-ping keepalive stopped")
+                break
+            except Exception as e:
+                logger.debug(f"Self-ping error (ignored): {e}")
+            
+            await asyncio.sleep(ping_interval)
+    
     async def start_bot():
         """Start bot dengan delete_webhook untuk menghindari conflict"""
         event_bus = get_event_bus()
@@ -2206,11 +2237,15 @@ def main():
         await asyncio.sleep(2)
         logger.info("✅ Web server started, now initializing Telegram bot...")
         
+        # Start self-ping keepalive untuk mencegah Koyeb sleep
+        keepalive_task = asyncio.create_task(self_ping_keepalive())
+        
         await app.initialize()
         await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook deleted, starting polling...")
         await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        if app.updater:
+            await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         
         try:
             while True:
@@ -2218,12 +2253,18 @@ def main():
         except asyncio.CancelledError:
             pass
         finally:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
             web_server_task.cancel()
             try:
                 await web_server_task
             except asyncio.CancelledError:
                 pass
-            await app.updater.stop()
+            if app.updater:
+                await app.updater.stop()
             await app.stop()
             await app.shutdown()
     
